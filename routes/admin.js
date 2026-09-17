@@ -3,14 +3,53 @@ const router = express.Router();
 
 const database = require("../database");
 const mqtt = require("../mqtt");
+const config = require("../config");
 const authenticate = require("../middleware/auth");
 const requireAdmin = require("../middleware/admin");
 
 router.use(authenticate);
 router.use(requireAdmin);
 
+function isValidProductCode(productCode) {
+    return Object.values(config.productCodes).includes(productCode);
+}
+
+function isValidChannelCount(channelCount) {
+    return Number.isInteger(channelCount) &&
+        channelCount >= 0 &&
+        channelCount <= config.maxChannelCount;
+}
+
+function validateDeviceInput(req, res) {
+    const channelCount = Number(req.body.channelCount);
+    if (
+        typeof req.body.deviceId !== "string" ||
+        req.body.deviceId.trim().length === 0 ||
+        !isValidProductCode(req.body.productCode) ||
+        !isValidChannelCount(channelCount)
+    ) {
+        res.status(400).json({
+            success: false,
+            message: `Invalid device details. Channel count must be between 0 and ${config.maxChannelCount}.`
+        });
+        return null;
+    }
+    return channelCount;
+}
+
 router.post("/create-user", (req, res) => {
     const { userid, username, password, role } = req.body;
+    if (
+        typeof userid !== "string" || userid.trim().length === 0 ||
+        typeof username !== "string" || username.trim().length === 0 ||
+        typeof password !== "string" || password.length < 8 ||
+        !["user", "admin"].includes(role)
+    ) {
+        return res.status(400).json({
+            success: false,
+            message: "Invalid user details. Passwords must be at least 8 characters."
+        });
+    }
     database.createUser(
         userid,
         username,
@@ -72,6 +111,16 @@ router.delete("/user/:userid", (req, res) => {
 router.put("/user/:userid", (req, res) => {
     const userid = req.params.userid;
     const { username, password, role } = req.body;
+    if (
+        typeof username !== "string" || username.trim().length === 0 ||
+        (password && (typeof password !== "string" || password.length < 8)) ||
+        !["user", "admin"].includes(role)
+    ) {
+        return res.status(400).json({
+            success: false,
+            message: "Invalid user details. Passwords must be at least 8 characters."
+        });
+    }
     database.updateUser(
         userid,
         username,
@@ -161,6 +210,10 @@ router.post("/assign-device", (req, res) => {
         productCode,
         channelCount
     } = req.body;
+    const validChannelCount = validateDeviceInput(req, res);
+    if (validChannelCount === null) {
+        return;
+    }
     database.getUserByUserId(userid, (err, user) => {
         if (err) {
             return res.status(500).json({
@@ -178,7 +231,7 @@ router.post("/assign-device", (req, res) => {
             deviceId,
             user.user_id,
             productCode,
-            Number(channelCount),
+            validChannelCount,
             (err) => {
                 if (err) {
                     return res.status(400).json({
@@ -202,6 +255,13 @@ router.put("/device/:deviceId", (req, res) => {
         productCode,
         channelCount
     } = req.body;
+    const validChannelCount = validateDeviceInput(
+        { body: { ...req.body, deviceId } },
+        res
+    );
+    if (validChannelCount === null) {
+        return;
+    }
     database.getUserByUserId(userid, (err, user) => {
         if (err) {
             return res.status(500).json({
@@ -219,7 +279,7 @@ router.put("/device/:deviceId", (req, res) => {
             deviceId,
             user.user_id,
             productCode,
-            Number(channelCount),
+            validChannelCount,
             (err) => {
                 if (err) {
                     return res.status(500).json({

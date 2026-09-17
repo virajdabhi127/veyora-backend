@@ -6,3 +6,4 @@ simulator.js
 assignDevice.js
 createUser.js
 veyora.db
+simulator-state.json

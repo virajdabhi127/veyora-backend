@@ -3,6 +3,7 @@ const router = express.Router();
 const database = require("../database");
 const mqtt = require("../mqtt");
 const authenticate = require("../middleware/auth");
+const requireDeviceOwner = require("../middleware/deviceOwner");
 
 router.get("/", authenticate, (req, res) => {
     const userId = req.user.user_id;
@@ -21,7 +22,11 @@ router.get("/", authenticate, (req, res) => {
     });
 });
 
-router.get("/:deviceId/daily-energy", authenticate, (req, res) => {
+// All remaining routes operate on one device. Authentication alone is not
+// sufficient: the authenticated user must own that device.
+router.use("/:deviceId", authenticate, requireDeviceOwner);
+
+router.get("/:deviceId/daily-energy", (req, res) => {
     const deviceId = req.params.deviceId;
     database.getDailyEnergy(deviceId, (err, energy) => {
         if (err) {
@@ -39,7 +44,7 @@ router.get("/:deviceId/daily-energy", authenticate, (req, res) => {
     });
 });
 
-router.get("/:deviceId/monthly-energy", authenticate, (req, res) => {
+router.get("/:deviceId/monthly-energy", (req, res) => {
     const deviceId = req.params.deviceId;
     database.getMonthlyEnergy(deviceId, (err, energy) => {
         if (err) {
@@ -63,7 +68,7 @@ router.get("/:deviceId/monthly-energy", authenticate, (req, res) => {
     });
 });
 
-router.get("/:deviceId/channels", authenticate, (req, res) => {
+router.get("/:deviceId/channels", (req, res) => {
     const deviceId = req.params.deviceId;
     database.getDeviceChannels(deviceId, (err, channels) => {
         if (err) {
@@ -80,7 +85,7 @@ router.get("/:deviceId/channels", authenticate, (req, res) => {
     });
 });
 
-router.put("/:deviceId/channels/:channelId", authenticate, (req, res) => {
+router.put("/:deviceId/channels/:channelId", (req, res) => {
     const deviceId = req.params.deviceId;
     const channelId = Number(req.params.channelId);
     const channelName = req.body.channelName;
@@ -130,7 +135,7 @@ router.put("/:deviceId/channels/:channelId", authenticate, (req, res) => {
     );
 });
 
-router.get("/:deviceId/wifi", authenticate, async (req, res) => {
+router.get("/:deviceId/wifi", async (req, res) => {
     const deviceId = req.params.deviceId;
     try {
         const device = await new Promise((resolve, reject) => {
@@ -169,7 +174,7 @@ router.get("/:deviceId/wifi", authenticate, async (req, res) => {
     }
 });
 
-router.delete("/:deviceId/wifi/:wifiId", authenticate, async (req, res) => {
+router.delete("/:deviceId/wifi/:wifiId", async (req, res) => {
     const deviceId = req.params.deviceId;
     const wifiId = Number(req.params.wifiId);
     if (!Number.isInteger(wifiId) || wifiId < 0 || wifiId >= 5) {
@@ -225,7 +230,7 @@ router.delete("/:deviceId/wifi/:wifiId", authenticate, async (req, res) => {
     }
 });
 
-router.post("/:deviceId/wifi", authenticate, async (req, res) => {
+router.post("/:deviceId/wifi", async (req, res) => {
     const deviceId = req.params.deviceId;
     const ssid = req.body.ssid;
     const password = req.body.password;
@@ -302,7 +307,7 @@ router.post("/:deviceId/wifi", authenticate, async (req, res) => {
     }
 });
 
-router.get("/:deviceId/load-history", authenticate, (req, res) => {
+router.get("/:deviceId/load-history", (req, res) => {
     const deviceId = req.params.deviceId;
     database.getLoadHistory(deviceId, (err, history) => {
         if (err) {
@@ -319,7 +324,7 @@ router.get("/:deviceId/load-history", authenticate, (req, res) => {
     });
 });
 
-router.get("/:deviceId/daily-load", authenticate, (req, res) => {
+router.get("/:deviceId/daily-load", (req, res) => {
     const deviceId = req.params.deviceId;
     database.getDailyLoad(deviceId, (err, load) => {
         if (err) {
@@ -336,7 +341,7 @@ router.get("/:deviceId/daily-load", authenticate, (req, res) => {
     });
 });
 
-router.get("/:deviceId/monthly-load", authenticate, (req, res) => {
+router.get("/:deviceId/monthly-load", (req, res) => {
     const deviceId = req.params.deviceId;
     database.getMonthlyLoad(deviceId, (err, load) => {
         if (err) {

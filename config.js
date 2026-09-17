@@ -1,4 +1,4 @@
-module.exports = {
+const config = {
     mqtt: {
         host: process.env.MQTT_HOST,
         port: Number(process.env.MQTT_PORT) || 8883,
@@ -20,5 +20,30 @@ module.exports = {
     },
     isProduction: process.env.NODE_ENV === "production",
     offlineTimeout: 15000,
-    saveInterval: 60000
+    saveInterval: 60000,
+    maxChannelCount: Number(process.env.MAX_CHANNEL_COUNT) || 32
 };
+
+config.validate = function validate() {
+    const missing = [];
+    if (typeof config.jwt.secret !== "string" || config.jwt.secret.length < 32) {
+        missing.push("JWT_SECRET (at least 32 characters)");
+    }
+    if (!process.env.DATABASE_URL) {
+        for (const name of ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD"]) {
+            if (!process.env[name]) {
+                missing.push(name);
+            }
+        }
+    }
+    for (const name of ["MQTT_HOST", "MQTT_USERNAME", "MQTT_PASSWORD"]) {
+        if (!process.env[name]) {
+            missing.push(name);
+        }
+    }
+    if (missing.length > 0) {
+        throw new Error(`Missing or invalid required configuration: ${missing.join(", ")}`);
+    }
+};
+
+module.exports = config;
