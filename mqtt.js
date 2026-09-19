@@ -583,6 +583,20 @@ function setEnergy(deviceId, energyKWh) {
     });
 }
 
+function resetChannelEnergy(deviceId, channelId) {
+    return new Promise((resolve, reject) => {
+        const topic = `energymeter/${deviceId}/command`;
+        const payload = JSON.stringify({
+            action: "reset_channel_energy",
+            channelId: Number(channelId)
+        });
+        client.publish(topic, payload, (err) => {
+            if (err) return reject(err);
+            resolve();
+        });
+    });
+}
+
 function ensureDailyRowsForAllDevices() {
     const today = getISTDateString();
     if (dailyRowsEnsuredDate === today) return;
@@ -612,6 +626,7 @@ module.exports = {
     requestWiFi,
     addWiFi,
     setEnergy,
+    resetChannelEnergy,
     pendingWiFiRequests,
     lastDatabaseSave,
     lastLoadHistorySave,

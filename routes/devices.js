@@ -135,6 +135,69 @@ router.put("/:deviceId/channels/:channelId", (req, res) => {
     );
 });
 
+router.post("/:deviceId/reset-channel-energy", async (req, res) => {
+    const deviceId = req.params.deviceId;
+    const channelId = Number(req.body.channelId);
+    if (!Number.isInteger(channelId) || channelId < 1) {
+        return res.status(400).json({
+            success: false,
+            message: "Invalid channel ID."
+        });
+    }
+    database.getDevice(deviceId, async (err, device) => {
+        if (err) {
+            console.error(
+                `Failed to fetch device ${deviceId}:`,
+                err.message
+            );
+            return res.status(500).json({
+                success: false,
+                message: "Database error."
+            });
+        }
+        if (!device) {
+            return res.status(404).json({
+                success: false,
+                message: "Device not found."
+            });
+        }
+        if (!device.status) {
+            return res.status(409).json({
+                success: false,
+                message: "Device is offline. Reset commands cannot be sent right now."
+            });
+        }
+        try {
+            await mqtt.resetChannelEnergy(deviceId, channelId);
+        } catch (err) {
+            console.error(
+                `Failed to send reset command to ${deviceId}:`,
+                err.message
+            );
+            return res.status(504).json({
+                success: false,
+                message: "Device did not respond."
+            });
+        }
+        database.resetChannelEnergy(deviceId, channelId, (err) => {
+            if (err) {
+                console.error(
+                    `Failed to reset channel energy for ${deviceId}:`,
+                    err.message
+                );
+                return res.status(500).json({
+                    success: false,
+                    message: "Database error."
+                });
+            }
+            res.json({
+                success: true,
+                message: "Channel energy reset successfully."
+            });
+        });
+    });
+});
+
 router.get("/:deviceId/wifi", async (req, res) => {
     const deviceId = req.params.deviceId;
     try {

@@ -1514,6 +1514,21 @@ function getChannelEnergyHistory(deviceId, months, callback) {
     });
 }
 
+function resetChannelEnergy(deviceId, channelId, callback) {
+    db.query(
+        `UPDATE energy_history
+         SET channel_energy = jsonb_set(
+                 COALESCE(channel_energy, '{}'::jsonb),
+                 ARRAY[$2::text],
+                 '0'::jsonb
+             ),
+             recorded_at = CURRENT_TIMESTAMP
+         WHERE device_id = $1`,
+        [deviceId, String(channelId)],
+        callback
+    );
+}
+
 module.exports = {
     getUser,
     init,
@@ -1557,7 +1572,8 @@ module.exports = {
     getMonthlyEnergyHistory,
     calculatePGVCLCost,
     calculatePGVCLTodayCost,
-    getChannelEnergyHistory
+    getChannelEnergyHistory,
+    resetChannelEnergy
 };
 
 async function migrateMeasurementColumnTypes() {
