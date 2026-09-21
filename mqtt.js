@@ -35,6 +35,7 @@ function start() {
                 "energymeter/+/wifi",
                 "energymeter/+/load/buffer"
             ],
+            { qos: 1 },
             (err) => {
                 if (err) {
                     console.error("Subscribe Failed:",err.message);
@@ -88,6 +89,7 @@ function start() {
         const product = parts[0];
         const deviceId = parts[1];
         const messageType = parts[2];
+        if (message.length === 0) return;
         if (messageType === "load" && parts[3] === "buffer") {
             try {
                 const data = JSON.parse(message.toString());
@@ -104,6 +106,7 @@ function start() {
                 }
                 if (data.samples.length > 20) {
                     console.error(`Load batch too large from ${deviceId}`);
+                    ackBatch(deviceId, data.batchId, { discarded: true });
                     return;
                 }
                 const validSamples = data.samples.filter(sample =>
@@ -114,6 +117,7 @@ function start() {
                 );
                 if (validSamples.length === 0) {
                     console.error(`All samples invalid in batch ${data.batchId} from ${deviceId}`);
+                    ackBatch(deviceId, data.batchId, { discarded: true });
                     return;
                 }
                 if (validSamples.length < data.samples.length) {
@@ -136,7 +140,7 @@ function start() {
                             batchId: data.batchId,
                             success: true
                         });
-                        client.publish(ackTopic, ackPayload, (err) => {
+                        client.publish(ackTopic, ackPayload, { qos: 1 }, (err) => {
                             if (err) {
                                 console.error(
                                     `Failed to send load ACK for ${deviceId}:`,
@@ -302,11 +306,15 @@ function start() {
                         }
                     );
                 }
-                checkDailyLoadRollover(deviceId);
                 mqttEvents.emit("data", deviceData);
             }
             catch (err) {
-                console.log("Invalid MQTT JSON", err.message);
+                console.log(
+                    "Invalid MQTT JSON", err.message,
+                    "| topic:", topic,
+                    "| length:", message.length,
+                    "| payload:", message.toString().slice(0, 200)
+                );
             }
         });
     });
@@ -321,82 +329,11 @@ function getISTDateString(date = new Date()) {
     }).format(date);
 }
 
-function checkDailyLoadRollover(deviceId) {
-    const now = new Date();
-    const istTime = new Intl.DateTimeFormat("en-IN", {
-        timeZone: "Asia/Kolkata",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hour12: false
-    }).format(now);
-    if (istTime !== "23:59:59") {
-        return;
-    }
-    const historyDate = getISTDateString();
-    database.calculateDailyLoad(
-        deviceId,
-        historyDate,
-        (err) => {
-            if (err) {
-                console.error(
-                    `Daily load calculation failed for ${deviceId}:`,
-                    err.message
-                );
-                return;
-            }
-            database.verifyDailyLoad(
-                deviceId,
-                historyDate,
-                (err, result) => {
-                    if (err) {
-                        console.error(
-                            `Daily load verification failed for ${deviceId}:`,
-                            err.message
-                        );
-                        return;
-                    }
-                    if (result.rows.length === 0) {
-                        console.error(
-                            `Daily load summary missing for ${deviceId} on ${historyDate}. Load history will NOT be deleted.`
-                        );
-                        return;
-                    }
-                    database.verifyFinalLoadReading(
-                        deviceId,
-                        historyDate,
-                        (err, result) => {
-                            if (err) {
-                                console.error(
-                                    `Final load reading verification failed for ${deviceId}:`,
-                                    err.message
-                                );
-                                return;
-                            }
-                            if (result.rows.length === 0) {
-                                console.error(
-                                    `Final load reading missing for ${deviceId} on ${historyDate}. Load history will NOT be deleted.`
-                                );
-                                return;
-                            }
-                            database.deleteDailyLoadHistory(
-                                deviceId,
-                                historyDate,
-                                (err, result) => {
-                                    if (err) {
-                                        console.error(
-                                            `Load history deletion failed for ${deviceId}:`,
-                                            err.message
-                                        );
-                                        return;
-                                    }
-                                }
-                            );
-                        }
-                    );
-                }
-            );
-        }
+function ackBatch(deviceId, batchId, extra) {
+    client.publish(
+        `energymeter/${deviceId}/load/ack`,
+        JSON.stringify(Object.assign({ batchId, success: true }, extra)),
+        { qos: 1 }
     );
 }
 
@@ -423,6 +360,44 @@ function finalizePreviousDayLoad(deviceId) {
         }
     );
 }
+
+const rolledOver = new Map();
+
+setInterval(() => {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Asia/Kolkata",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+    }).format(new Date()).split(":");
+    const minutesIST = Number(parts[0]) * 60 + Number(parts[1]);
+    if (minutesIST < 5) return;   // wait until 00:05 IST so late buffered data is included
+
+    const today = getISTDateString();
+    const yesterday = getISTDateString(new Date(Date.now() - 24 * 60 * 60 * 1000));
+
+    for (const deviceId of latestDevices.keys()) {
+        if (rolledOver.get(deviceId) === today) continue;
+        database.calculateDailyLoad(deviceId, yesterday, (err) => {
+            if (err) {
+                console.error(`Rollover calc failed for ${deviceId}:`, err.message);
+                return;
+            }
+            database.verifyDailyLoad(deviceId, yesterday, (err, result) => {
+                if (err || result.rows.length === 0) {
+                    return;
+                }
+                database.deleteDailyLoadHistory(deviceId, yesterday, (err) => {
+                    if (err) {
+                        console.error(`Rollover delete failed for ${deviceId}:`, err.message);
+                        return;
+                    }
+                    rolledOver.set(deviceId, today);
+                });
+            });
+        });
+    }
+}, 60 * 1000);
 
 setInterval(() => {
     const now = Date.now();

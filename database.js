@@ -1029,98 +1029,85 @@ function saveLoadHistory(deviceId, realPower, recordedAt, callback) {
 }
 
 function saveLoadHistoryBatch(deviceId, batchId, samples, callback) {
-    db.query("BEGIN", (err) => {
-        if (err) {
-            return callback(err);
+    const MIN_VALID_EPOCH = 1704067200;
+    const nowSec = Date.now() / 1000;
+    const times = [];
+    const powers = [];
+    let dropped = 0;
+
+    samples.forEach(s => {
+        const tsSec = s.ts > 1e11 ? s.ts / 1000 : s.ts;
+        if (tsSec < MIN_VALID_EPOCH || tsSec > nowSec + 86400) {
+            dropped++;
+            return;
         }
-        db.query(
-            `
-            INSERT INTO load_history_batches
-            (device_id, batch_id)
-            VALUES ($1, $2)
-            ON CONFLICT (device_id, batch_id)
-            DO NOTHING
-            RETURNING id
-            `,
-            [deviceId, batchId],
-            (err, result) => {
+        times.push(new Date(tsSec * 1000).toISOString());
+        powers.push(Number(s.kw) * 1000);
+    });
+
+    if (dropped > 0) {
+        console.warn(`Batch ${batchId} from ${deviceId}: dropped ${dropped}/${samples.length} invalid samples`);
+    }
+
+    db.connect((connectError, client, release) => {
+        if (connectError) {
+            return callback(connectError);
+        }
+
+        function fail(err) {
+            client.query("ROLLBACK", () => {
+                release();
+                callback(err);
+            });
+        }
+
+        function finish(isDuplicate) {
+            client.query("COMMIT", (err) => {
                 if (err) {
-                    return db.query(
-                        "ROLLBACK",
-                        () => callback(err)
-                    );
+                    return fail(err);
                 }
-                if (result.rows.length === 0) {
-                    return db.query(
-                        "COMMIT",
-                        (err) => {
-                            if (err) {
-                                return db.query(
-                                    "ROLLBACK",
-                                    () => callback(err)
-                                );
-                            }
-                            callback(null, true);
-                        }
-                    );
-                }
-                let index = 0;
-                function insertNext() {
-                    if (index >= samples.length) {
-                        return db.query(
-                            "COMMIT",
-                            (err) => {
-                                if (err) {
-                                    return db.query(
-                                        "ROLLBACK",
-                                        () => callback(err)
-                                    );
-                                }
-                                callback(null, false);
-                            }
-                        );
-                    }
-                    const sample = samples[index];
-                    if (sample.synced === false) {
-                        index++;
-                        return insertNext();
-                    }
-                    const recordedAt = new Date(sample.ts * 1000);
-                    const MIN_VALID_EPOCH = 1704067200;
-                    if (sample.ts < MIN_VALID_EPOCH) {
-                        index++;
-                        return insertNext();
-                    }
-                    db.query(
-                        `
-                        INSERT INTO load_history
-                        (
-                            device_id,
-                            real_power,
-                            recorded_at
-                        )
-                        VALUES ($1, $2, $3)
-                        `,
-                        [
-                            deviceId,
-                            Number(sample.kw) * 1000,
-                            recordedAt
-                        ],
-                        (err) => {
-                            if (err) {
-                                return db.query(
-                                    "ROLLBACK",
-                                    () => callback(err)
-                                );
-                            }
-                            index++;
-                            insertNext();
-                        }
-                    );
-                }
-                insertNext();
+                release();
+                callback(null, isDuplicate);
+            });
+        }
+
+        client.query("BEGIN", (err) => {
+            if (err) {
+                release();
+                return callback(err);
             }
-        );
+
+            client.query(
+                `INSERT INTO load_history_batches (device_id, batch_id)
+                 VALUES ($1, $2)
+                 ON CONFLICT (device_id, batch_id) DO NOTHING
+                 RETURNING id`,
+                [deviceId, batchId],
+                (err, result) => {
+                    if (err) {
+                        return fail(err);
+                    }
+                    if (result.rows.length === 0) {
+                        return finish(true);      // duplicate batch
+                    }
+                    if (times.length === 0) {
+                        return finish(false);     // nothing valid to insert
+                    }
+                    client.query(
+                        `INSERT INTO load_history (device_id, real_power, recorded_at)
+                         SELECT $1::text, u.p, u.t
+                         FROM unnest($2::numeric[], $3::timestamptz[]) AS u(p, t)`,
+                        [deviceId, powers, times],
+                        (err) => {
+                            if (err) {
+                                return fail(err);
+                            }
+                            finish(false);
+                        }
+                    );
+                }
+            );
+        });
     });
 }
 
@@ -1348,8 +1335,8 @@ function deleteDailyLoadHistory(deviceId, historyDate, callback) {
     const query = `
         DELETE FROM load_history
         WHERE device_id = $1
-          AND recorded_at >= $2::date
-          AND recorded_at < ($2::date + INTERVAL '1 day')
+          AND recorded_at >= ($2::date AT TIME ZONE 'Asia/Kolkata')
+          AND recorded_at < (($2::date + 1) AT TIME ZONE 'Asia/Kolkata')
     `;
     db.query(query, [deviceId, historyDate], (err, result) => {
         if (err) {
