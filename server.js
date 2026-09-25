@@ -6,6 +6,7 @@ const helmet = require("helmet");
 const jwt = require("jsonwebtoken");
 const authRoutes = require("./routes/auth");
 const deviceRoutes = require("./routes/devices");
+const whatsappRoutes = require("./routes/whatsapp");
 const database = require("./database");
 const config = require("./config");
 const mqtt = require("./mqtt");
@@ -38,6 +39,7 @@ app.use("/auth", authRoutes);
 app.use("/admin", adminRoutes);
 app.use("/devices", deviceRoutes);
 app.use("/ai", aiRoutes);
+app.use("/webhook/whatsapp", whatsappRoutes);
 
 database.init(() => {
     mqtt.start();
