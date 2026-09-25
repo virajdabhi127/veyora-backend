@@ -127,6 +127,7 @@ router.put("/:deviceId/channels/:channelId", (req, res) => {
                     message: "Database error."
                 });
             }
+            mqtt.publishChannelNames(deviceId);
             res.json({
                 success: true,
                 message: "Channel name updated successfully."

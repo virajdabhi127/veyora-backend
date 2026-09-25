@@ -1516,6 +1516,40 @@ function resetChannelEnergy(deviceId, channelId, callback) {
     );
 }
 
+function publishChannelNames(deviceId) {
+    database.getDeviceChannels(deviceId, (err, rows) => {
+        if (err) {
+            console.error(`Failed to load channels for ${deviceId}:`, err.message);
+            return;
+        }
+        if (!rows || rows.length === 0) return;
+        const names = rows
+            .sort((a, b) => a.channel_id - b.channel_id)
+            .map(r => r.channel_name);
+        const topic = `energymeter/${deviceId}/channels`;
+        const payload = JSON.stringify({ names });
+        client.publish(topic, payload, { retain: true, qos: 1 }, (err) => {
+            if (err) {
+                console.error(`Failed to publish channel names for ${deviceId}:`, err.message);
+            }
+        });
+    });
+}
+
+function getStaleLoadHistoryDates(retentionDays, callback) {
+    const query = `
+        SELECT DISTINCT
+            device_id AS "deviceId",
+            (recorded_at AT TIME ZONE 'Asia/Kolkata')::date AS "historyDate"
+        FROM load_history
+        WHERE recorded_at < (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - ($1::INTEGER * INTERVAL '1 day')
+    `;
+    db.query(query, [retentionDays], (err, result) => {
+        if (err) return callback(err, null);
+        callback(null, result.rows);
+    });
+}
+
 module.exports = {
     getUser,
     init,
@@ -1560,7 +1594,9 @@ module.exports = {
     calculatePGVCLCost,
     calculatePGVCLTodayCost,
     getChannelEnergyHistory,
-    resetChannelEnergy
+    resetChannelEnergy,
+    publishChannelNames,
+    getStaleLoadHistoryDates
 };
 
 async function migrateMeasurementColumnTypes() {

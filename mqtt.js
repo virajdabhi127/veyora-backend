@@ -361,43 +361,30 @@ function finalizePreviousDayLoad(deviceId) {
     );
 }
 
-const rolledOver = new Map();
+const LOAD_HISTORY_RETENTION_DAYS = 2;
 
 setInterval(() => {
-    const parts = new Intl.DateTimeFormat("en-GB", {
-        timeZone: "Asia/Kolkata",
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: false
-    }).format(new Date()).split(":");
-    const minutesIST = Number(parts[0]) * 60 + Number(parts[1]);
-    if (minutesIST < 5) return;   // wait until 00:05 IST so late buffered data is included
-
-    const today = getISTDateString();
-    const yesterday = getISTDateString(new Date(Date.now() - 24 * 60 * 60 * 1000));
-
-    for (const deviceId of latestDevices.keys()) {
-        if (rolledOver.get(deviceId) === today) continue;
-        database.calculateDailyLoad(deviceId, yesterday, (err) => {
-            if (err) {
-                console.error(`Rollover calc failed for ${deviceId}:`, err.message);
-                return;
-            }
-            database.verifyDailyLoad(deviceId, yesterday, (err, result) => {
-                if (err || result.rows.length === 0) {
+    database.getStaleLoadHistoryDates(LOAD_HISTORY_RETENTION_DAYS, (err, rows) => {
+        if (err) {
+            console.error("Stale load_history sweep failed:", err.message);
+            return;
+        }
+        rows.forEach(({ deviceId, historyDate }) => {
+            const dateStr = historyDate.toISOString().split("T")[0];
+            database.calculateDailyLoad(deviceId, dateStr, (err) => {
+                if (err) {
+                    console.error(`Sweep calc failed for ${deviceId} ${dateStr}:`, err.message);
                     return;
                 }
-                database.deleteDailyLoadHistory(deviceId, yesterday, (err) => {
+                database.deleteDailyLoadHistory(deviceId, dateStr, (err) => {
                     if (err) {
-                        console.error(`Rollover delete failed for ${deviceId}:`, err.message);
-                        return;
+                        console.error(`Sweep delete failed for ${deviceId} ${dateStr}:`, err.message);
                     }
-                    rolledOver.set(deviceId, today);
                 });
             });
         });
-    }
-}, 60 * 1000);
+    });
+}, 60 * 60 * 1000);
 
 setInterval(() => {
     const now = Date.now();
