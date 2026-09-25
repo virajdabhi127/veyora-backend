@@ -1516,26 +1516,6 @@ function resetChannelEnergy(deviceId, channelId, callback) {
     );
 }
 
-function publishChannelNames(deviceId) {
-    database.getDeviceChannels(deviceId, (err, rows) => {
-        if (err) {
-            console.error(`Failed to load channels for ${deviceId}:`, err.message);
-            return;
-        }
-        if (!rows || rows.length === 0) return;
-        const names = rows
-            .sort((a, b) => a.channel_id - b.channel_id)
-            .map(r => r.channel_name);
-        const topic = `energymeter/${deviceId}/channels`;
-        const payload = JSON.stringify({ names });
-        client.publish(topic, payload, { retain: true, qos: 1 }, (err) => {
-            if (err) {
-                console.error(`Failed to publish channel names for ${deviceId}:`, err.message);
-            }
-        });
-    });
-}
-
 function getStaleLoadHistoryDates(retentionDays, callback) {
     const query = `
         SELECT DISTINCT
@@ -1595,7 +1575,6 @@ module.exports = {
     calculatePGVCLTodayCost,
     getChannelEnergyHistory,
     resetChannelEnergy,
-    publishChannelNames,
     getStaleLoadHistoryDates
 };
 
