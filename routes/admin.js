@@ -208,7 +208,8 @@ router.post("/assign-device", (req, res) => {
         deviceId,
         userid,
         productCode,
-        channelCount
+        channelCount,
+        productKey
     } = req.body;
     const validChannelCount = validateDeviceInput(req, res);
     if (validChannelCount === null) {
@@ -232,6 +233,7 @@ router.post("/assign-device", (req, res) => {
             user.user_id,
             productCode,
             validChannelCount,
+            productKey,
             (err) => {
                 if (err) {
                     return res.status(400).json({

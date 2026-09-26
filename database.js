@@ -56,6 +56,7 @@ async function initializeDatabase() {
             channel_count INTEGER DEFAULT 1,
             status INTEGER DEFAULT 0,
             last_update TIMESTAMPTZ,
+            product_key TEXT,
             FOREIGN KEY(user_id) REFERENCES users(user_id)
         )
     `);
@@ -230,7 +231,7 @@ function createUser(userid, username, password, role, callback) {
     );
 }
 
-function assignDevice(deviceId, userId, productCode, channelCount, callback) {
+function assignDevice(deviceId, userId, productCode, channelCount, productKey, callback) {
     db.query(
         "SELECT device_id FROM devices WHERE device_id = $1",
         [deviceId],
@@ -248,10 +249,11 @@ function assignDevice(deviceId, userId, productCode, channelCount, callback) {
                     user_id,
                     product_code,
                     payload_version,
-                    channel_count
+                    channel_count,
+                    product_key
                 )
-                VALUES ($1, $2, $3, $4, $5)`,
-                [deviceId, userId, productCode, 1, channelCount],
+                VALUES ($1, $2, $3, $4, $5, $6)`,
+                [deviceId, userId, productCode, 1, channelCount, productKey],
                 (err) => {
                     if (err) {
                         return callback(err);
