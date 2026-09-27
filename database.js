@@ -43,7 +43,8 @@ async function initializeDatabase() {
             userid TEXT UNIQUE NOT NULL,
             username TEXT NOT NULL,
             password TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'user'
+            role TEXT NOT NULL DEFAULT 'user',
+            whatsapp_number TEXT
         )
     `);
 
@@ -185,6 +186,7 @@ function ensureAdmin(callback) {
                 process.env.DEFAULT_ADMIN_NAME,
                 process.env.DEFAULT_ADMIN_PASSWORD,
                 "admin",
+                null,
                 (err) => {
                     if (err) {
                         return callback(err);
@@ -197,7 +199,7 @@ function ensureAdmin(callback) {
     );
 }
 
-function createUser(userid, username, password, role, callback) {
+function createUser(userid, username, password, role, whatsappNumber, callback) {
     db.query(
         "SELECT user_id FROM users WHERE userid = $1",
         [userid],
@@ -205,21 +207,18 @@ function createUser(userid, username, password, role, callback) {
             if (err) {
                 return callback(err);
             }
-
             if (result.rows.length > 0) {
                 return callback(new Error("User ID already exists."));
             }
-
             bcrypt.hash(password, 10, (err, hash) => {
                 if (err) {
                     return callback(err);
                 }
-
                 db.query(
-                    `INSERT INTO users (userid, username, password, role)
-                     VALUES ($1, $2, $3, $4)
+                    `INSERT INTO users (userid, username, password, role, whatsapp_number)
+                     VALUES ($1, $2, $3, $4, $5)
                      RETURNING user_id`,
-                    [userid, username, hash, role],
+                    [userid, username, hash, role, whatsappNumber || null],
                     (err, result) => {
                         if (callback) {
                             callback(err, result?.rows[0]?.user_id);
@@ -691,7 +690,8 @@ function getAllUsers(callback) {
         `SELECT
             userid,
             username,
-            role
+            role,
+            whatsapp_number AS "whatsappNumber"
          FROM users
          ORDER BY user_id`,
         (err, result) => {
@@ -709,14 +709,15 @@ function deleteUser(userid, callback) {
     );
 }
 
-function updateUser(userid, username, password, role, callback) {
+function updateUser(userid, username, password, role, whatsappNumber, callback) {
     if (!password) {
         db.query(
             `UPDATE users
              SET username = $1,
-                 role = $2
-             WHERE userid = $3`,
-            [username, role, userid],
+                 role = $2,
+                 whatsapp_number = $3
+             WHERE userid = $4`,
+            [username, role, whatsappNumber || null, userid],
             callback
         );
     } else {
@@ -728,9 +729,10 @@ function updateUser(userid, username, password, role, callback) {
                 `UPDATE users
                  SET username = $1,
                      password = $2,
-                     role = $3
-                 WHERE userid = $4`,
-                [username, hash, role, userid],
+                     role = $3,
+                     whatsapp_number = $4
+                 WHERE userid = $5`,
+                [username, hash, role, whatsappNumber || null, userid],
                 callback
             );
         });

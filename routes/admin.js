@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 
+const { sendWelcomeMessage } = require("../services/whatsappService");
 const database = require("../database");
 const mqtt = require("../mqtt");
 const config = require("../config");
@@ -9,6 +10,11 @@ const requireAdmin = require("../middleware/admin");
 
 router.use(authenticate);
 router.use(requireAdmin);
+
+function isValidWhatsAppNumber(number) {
+    if (!number) return true;
+    return /^[1-9]\d{9,14}$/.test(number);
+}
 
 function isValidProductCode(productCode) {
     return Object.values(config.productCodes).includes(productCode);
@@ -38,12 +44,13 @@ function validateDeviceInput(req, res) {
 }
 
 router.post("/create-user", (req, res) => {
-    const { userid, username, password, role } = req.body;
+    const { userid, username, password, role, whatsappNumber } = req.body;
     if (
         typeof userid !== "string" || userid.trim().length === 0 ||
         typeof username !== "string" || username.trim().length === 0 ||
         typeof password !== "string" || password.length < 8 ||
-        !["user", "admin"].includes(role)
+        !["user", "admin"].includes(role) ||
+        !isValidWhatsAppNumber(whatsappNumber)
     ) {
         return res.status(400).json({
             success: false,
@@ -55,11 +62,19 @@ router.post("/create-user", (req, res) => {
         username,
         password,
         role,
+        whatsappNumber,
         (err, userId) => {
             if (err) {
                 return res.status(400).json({
                     success: false,
                     message: err.message
+                });
+            }
+            if (whatsappNumber) {
+                sendWelcomeMessage(whatsappNumber, { name: username }).then((result) => {
+                    if (!result.success) {
+                        console.error(`Welcome message failed for ${userid}:`, result.error);
+                    }
                 });
             }
             res.json({
@@ -110,11 +125,12 @@ router.delete("/user/:userid", (req, res) => {
 
 router.put("/user/:userid", (req, res) => {
     const userid = req.params.userid;
-    const { username, password, role } = req.body;
+    const { username, password, role, whatsappNumber } = req.body;
     if (
         typeof username !== "string" || username.trim().length === 0 ||
         (password && (typeof password !== "string" || password.length < 8)) ||
-        !["user", "admin"].includes(role)
+        !["user", "admin"].includes(role) ||
+        !isValidWhatsAppNumber(whatsappNumber)
     ) {
         return res.status(400).json({
             success: false,
@@ -126,6 +142,7 @@ router.put("/user/:userid", (req, res) => {
         username,
         password,
         role,
+        whatsappNumber,
         (err) => {
             if (err) {
                 return res.status(500).json({
