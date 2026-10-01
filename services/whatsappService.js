@@ -54,18 +54,6 @@ async function sendTemplate(to, templateName, { bodyParams = [], headerParams = 
 }
 
 /**
- * Sends the approved "veyora_summary" daily template.
- * All 6 variables are in the BODY.
- * @param {string} to
- * @param {object} data - { name, date, kwh, cost, peakW, tip }
- */
-function sendDailySummary(to, data) {
-  return sendTemplate(to, 'veyora_summary', {
-    bodyParams: [data.name, data.date, data.kwh, data.cost, data.peakW, data.tip],
-  });
-}
-
-/**
  * Sends the approved "veyora_welcome" template when a new user is created.
  * The {{1}} variable is in the HEADER ("Welcome to Veyora, {{1}}"), not the body.
  * @param {string} to
@@ -77,4 +65,4 @@ function sendWelcomeMessage(to, data) {
   });
 }
 
-module.exports = { sendDailySummary, sendWelcomeMessage, sendTemplate };
+module.exports = { sendWelcomeMessage, sendTemplate };

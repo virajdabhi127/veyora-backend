@@ -1,5 +1,4 @@
 require("dotenv").config();
-require('./jobs/dailySummary');
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
