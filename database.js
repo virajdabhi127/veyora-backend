@@ -1534,6 +1534,39 @@ function getStaleLoadHistoryDates(retentionDays, callback) {
     });
 }
 
+function getUserByWhatsapp(whatsappNumber, callback) {
+    db.query(
+        `SELECT user_id, userid, username
+         FROM users
+         WHERE RIGHT(regexp_replace(whatsapp_number, '\\D', '', 'g'), 10)
+             = RIGHT(regexp_replace($1, '\\D', '', 'g'), 10)
+         LIMIT 1`,
+        [whatsappNumber],
+        (err, result) => {
+            callback(err, result?.rows[0] || null);
+        }
+    );
+}
+
+function linkWhatsappNumberToDevice(deviceId, whatsappNumber, callback) {
+    db.query(
+        `UPDATE users
+         SET whatsapp_number = $1
+         WHERE user_id = (
+             SELECT user_id FROM devices WHERE device_id = $2
+         )
+         RETURNING user_id, username`,
+        [whatsappNumber, deviceId],
+        (err, result) => {
+            if (err) return callback(err);
+            if (result.rowCount === 0) {
+                return callback(new Error("Device not linked to any user."));
+            }
+            callback(null, result.rows[0]);
+        }
+    );
+}
+
 module.exports = {
     getUser,
     init,
@@ -1579,7 +1612,9 @@ module.exports = {
     calculatePGVCLTodayCost,
     getChannelEnergyHistory,
     resetChannelEnergy,
-    getStaleLoadHistoryDates
+    getStaleLoadHistoryDates,
+    getUserByWhatsapp,
+    linkWhatsappNumberToDevice
 };
 
 async function migrateMeasurementColumnTypes() {

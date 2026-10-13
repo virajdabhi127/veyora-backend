@@ -129,10 +129,6 @@ function start() {
                     validSamples,
                     (err) => {
                         if (err) {
-                            console.error(
-                                `Failed to save load batch ${data.batchId} from ${deviceId}:`,
-                                err.message
-                            );
                             return;
                         }
                         const ackTopic = `energymeter/${deviceId}/load/ack`;
@@ -142,10 +138,6 @@ function start() {
                         });
                         client.publish(ackTopic, ackPayload, { qos: 1 }, (err) => {
                             if (err) {
-                                console.error(
-                                    `Failed to send load ACK for ${deviceId}:`,
-                                    err.message
-                                );
                                 return;
                             }
                         });
