@@ -1,38 +1,3 @@
-// {
-//   "object": "whatsapp_business_account",
-//   "entry": [
-//     {
-//       "id": "28161412583558706",
-//       "changes": [
-//         {
-//           "value": {
-//             "messaging_product": "whatsapp",
-//             "metadata": {
-//               "display_phone_number": "919429587233",
-//               "phone_number_id": "1366092386585389"
-//             },
-//             "contacts": [
-//               {
-//                 "profile": { "name": "Viraj Dabhi" },
-//                 "wa_id": "919409205916"
-//               }
-//             ],
-//             "messages": [
-//               {
-//                 "from": "919409205916",
-//                 "id": "wamid.test123",
-//                 "timestamp": "1791898182",
-//                 "text": { "body": "hi" },
-//                 "type": "text"
-//               }
-//             ]
-//           },
-//           "field": "messages"
-//         }
-//       ]
-//     }
-//   ]
-// }
 const axios = require('axios');
 
 const WHATSAPP_API_URL = `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`;

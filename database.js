@@ -44,8 +44,36 @@ async function initializeDatabase() {
             username TEXT NOT NULL,
             password TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'user',
-            whatsapp_number TEXT
+            whatsapp_number JSONB NOT NULL DEFAULT '[]'::jsonb
         )
+    `);
+
+    await db.query(`
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'users'
+                AND column_name = 'whatsapp_number'
+                AND data_type <> 'jsonb'
+            ) THEN
+                ALTER TABLE users
+                ALTER COLUMN whatsapp_number DROP DEFAULT;
+                ALTER TABLE users
+                ALTER COLUMN whatsapp_number TYPE JSONB
+                USING CASE
+                    WHEN whatsapp_number IS NULL
+                        OR TRIM(whatsapp_number) = ''
+                    THEN '[]'::jsonb
+                    ELSE jsonb_build_array(whatsapp_number)
+                END;
+                ALTER TABLE users
+                ALTER COLUMN whatsapp_number SET DEFAULT '[]'::jsonb;
+                ALTER TABLE users
+                ALTER COLUMN whatsapp_number SET NOT NULL;
+            END IF;
+        END $$;
     `);
 
     await db.query(`
@@ -200,92 +228,143 @@ function ensureAdmin(callback) {
 }
 
 function createUser(userid, username, password, role, whatsappNumber, callback) {
+    const digits = String(whatsappNumber || "").replace(/\D/g, "");
+    const last10 = digits.slice(-10);
+    if (whatsappNumber && last10.length !== 10) {
+        return callback(new Error("Invalid WhatsApp number."));
+    }
+    const normalizedNumber = last10 ? `+91${last10}` : null;
+
     db.query(
         "SELECT user_id FROM users WHERE userid = $1",
         [userid],
         (err, result) => {
-            if (err) {
-                return callback(err);
-            }
+            if (err) return callback(err);
             if (result.rows.length > 0) {
                 return callback(new Error("User ID already exists."));
             }
-            bcrypt.hash(password, 10, (err, hash) => {
-                if (err) {
-                    return callback(err);
-                }
-                db.query(
-                    `INSERT INTO users (userid, username, password, role, whatsapp_number)
-                     VALUES ($1, $2, $3, $4, $5)
-                     RETURNING user_id`,
-                    [userid, username, hash, role, whatsappNumber || null],
-                    (err, result) => {
-                        if (callback) {
-                            callback(err, result?.rows[0]?.user_id);
+            const insertUser = () => {
+                bcrypt.hash(password, 10, (hashErr, hash) => {
+                    if (hashErr) return callback(hashErr);
+
+                    db.query(
+                        `INSERT INTO users
+                            (userid, username, password, role, whatsapp_number)
+                         VALUES ($1, $2, $3, $4, $5::jsonb)
+                         RETURNING user_id`,
+                        [
+                            userid,
+                            username,
+                            hash,
+                            role,
+                            JSON.stringify(normalizedNumber ? [normalizedNumber] : [])
+                        ],
+                        (insertErr, insertResult) => {
+                            if (callback) {
+                                callback(
+                                    insertErr,
+                                    insertResult?.rows[0]?.user_id
+                                );
+                            }
                         }
+                    );
+                });
+            };
+            if (!normalizedNumber) {
+                return insertUser();
+            }
+            db.query(
+                `SELECT 1
+                 FROM users u
+                 CROSS JOIN LATERAL
+                    jsonb_array_elements_text(
+                        COALESCE(u.whatsapp_number, '[]'::jsonb)
+                    ) AS n(value)
+                 WHERE RIGHT(
+                    REGEXP_REPLACE(n.value, '[^0-9]', '', 'g'),
+                    10
+                 ) = $1
+                 LIMIT 1`,
+                [last10],
+                (checkErr, checkResult) => {
+                    if (checkErr) return callback(checkErr);
+                    if (checkResult.rows.length > 0) {
+                        return callback(
+                            new Error(
+                                "This mobile number is already registered with an active Veyora account."
+                            )
+                        );
                     }
-                );
-            });
+                    insertUser();
+                }
+            );
         }
     );
 }
 
 function assignDevice(deviceId, userId, productCode, channelCount, productKey, callback) {
-    db.query(
-        "SELECT device_id FROM devices WHERE device_id = $1",
-        [deviceId],
-        (err, result) => {
-            if (err) {
-                return callback(err);
-            }
-            if (result.rows.length > 0) {
-                return callback(new Error("Device ID already exists."));
-            }
-            db.query(
-                `INSERT INTO devices
-                (
-                    device_id,
-                    user_id,
-                    product_code,
-                    payload_version,
-                    channel_count,
-                    product_key
-                )
-                VALUES ($1, $2, $3, $4, $5, $6)`,
-                [deviceId, userId, productCode, 1, channelCount, productKey],
-                (err) => {
-                    if (err) {
-                        return callback(err);
-                    }
-                    const channelValues = [];
-                    for (let i = 1; i <= channelCount; i++) {
-                        channelValues.push([
-                            deviceId,
-                            i,
-                            productCode,
-                            `Channel ${i}`
-                        ]);
-                    }
-                    const channelQuery = `
-                        INSERT INTO device_channels
-                        (
-                            device_id,
-                            channel_id,
-                            product_code,
-                            channel_name
-                        )
-                        VALUES ($1, $2, $3, $4)
-                    `;
-                    let completed = 0;
-                    if (channelValues.length === 0) {
-                        createEnergyHistory();
-                        return;
-                    }
-                    channelValues.forEach(values => {
-                        db.query(
-                            channelQuery,
-                            values,
-                            (err) => {
+    bcrypt.hash(productKey, 10, (hashErr, hashedProductKey) => {
+        if (hashErr) {
+            return callback(hashErr);
+        }
+        db.query(
+            "SELECT device_id FROM devices WHERE device_id = $1",
+            [deviceId],
+            (err, result) => {
+                if (err) {
+                    return callback(err);
+                }
+                if (result.rows.length > 0) {
+                    return callback(new Error("Device ID already exists."));
+                }
+                db.query(
+                    `INSERT INTO devices
+                    (
+                        device_id,
+                        user_id,
+                        product_code,
+                        payload_version,
+                        channel_count,
+                        product_key
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6)`,
+                    [
+                        deviceId,
+                        userId,
+                        productCode,
+                        1,
+                        channelCount,
+                        hashedProductKey
+                    ],
+                    (err) => {
+                        if (err) {
+                            return callback(err);
+                        }
+                        const channelValues = [];
+                        for (let i = 1; i <= channelCount; i++) {
+                            channelValues.push([
+                                deviceId,
+                                i,
+                                productCode,
+                                `Channel ${i}`
+                            ]);
+                        }
+                        const channelQuery = `
+                            INSERT INTO device_channels
+                            (
+                                device_id,
+                                channel_id,
+                                product_code,
+                                channel_name
+                            )
+                            VALUES ($1, $2, $3, $4)
+                        `;
+                        let completed = 0;
+                        if (channelValues.length === 0) {
+                            return createEnergyHistory();
+                        }
+                        channelValues.forEach((values) => {
+                            db.query(channelQuery, values, (err) => {
                                 if (err) {
                                     return callback(err);
                                 }
@@ -293,22 +372,22 @@ function assignDevice(deviceId, userId, productCode, channelCount, productKey, c
                                 if (completed === channelValues.length) {
                                     createEnergyHistory();
                                 }
-                            }
-                        );
-                    });
-                    function createEnergyHistory() {
-                        db.query(
-                            `INSERT INTO energy_history
-                             (device_id, energy_kwh)
-                             VALUES ($1, 0)`,
-                            [deviceId],
-                            callback
-                        );
+                            });
+                        });
+                        function createEnergyHistory() {
+                            db.query(
+                                `INSERT INTO energy_history
+                                 (device_id, energy_kwh)
+                                 VALUES ($1, 0)`,
+                                [deviceId],
+                                callback
+                            );
+                        }
                     }
-                }
-            );
-        }
-    );
+                );
+            }
+        );
+    });
 }
 
 function renameDeviceChannel(deviceId, channelId, channelName, callback) {
@@ -1535,36 +1614,298 @@ function getStaleLoadHistoryDates(retentionDays, callback) {
 }
 
 function getUserByWhatsapp(whatsappNumber, callback) {
+    const digits = String(whatsappNumber || "").replace(/\D/g, "");
+    const last10 = digits.slice(-10);
+    if (last10.length !== 10) {
+        return callback(null, null);
+    }
     db.query(
-        `SELECT user_id, userid, username
+        `SELECT *
          FROM users
-         WHERE RIGHT(regexp_replace(whatsapp_number, '\\D', '', 'g'), 10)
-             = RIGHT(regexp_replace($1, '\\D', '', 'g'), 10)
+         WHERE EXISTS (
+             SELECT 1
+             FROM jsonb_array_elements_text(
+                 COALESCE(whatsapp_number, '[]'::jsonb)
+             ) AS number(value)
+             WHERE RIGHT(REGEXP_REPLACE(number.value, '\\D', '', 'g'), 10) = $1
+         )
          LIMIT 1`,
-        [whatsappNumber],
-        (err, result) => {
-            callback(err, result?.rows[0] || null);
+        [last10],
+        (error, result) => {
+            if (error) {
+                return callback(error, null);
+            }
+            callback(null, result.rows[0] || null);
         }
     );
 }
 
 function linkWhatsappNumberToDevice(deviceId, whatsappNumber, callback) {
+    const digits = String(whatsappNumber || "").replace(/\D/g, "");
+    const last10 = digits.slice(-10);
+    if (!deviceId || last10.length !== 10) {
+        return callback(new Error("Invalid device ID or WhatsApp number"));
+    }
+    const normalizedNumber = `+91${last10}`;
     db.query(
-        `UPDATE users
-         SET whatsapp_number = $1
-         WHERE user_id = (
-             SELECT user_id FROM devices WHERE device_id = $2
-         )
-         RETURNING user_id, username`,
-        [whatsappNumber, deviceId],
-        (err, result) => {
-            if (err) return callback(err);
-            if (result.rowCount === 0) {
-                return callback(new Error("Device not linked to any user."));
+        `WITH device_owner AS (
+            SELECT user_id
+            FROM devices
+            WHERE device_id = $1
+              AND user_id IS NOT NULL
+            LIMIT 1
+        ),
+        existing_link AS (
+            SELECT u.user_id
+            FROM users u
+            CROSS JOIN LATERAL
+                jsonb_array_elements_text(
+                    COALESCE(u.whatsapp_number, '[]'::jsonb)
+                ) AS n(value)
+            WHERE RIGHT(
+                REGEXP_REPLACE(n.value, '\\D', '', 'g'), 10
+            ) = $2
+            LIMIT 1
+        )
+        UPDATE users u
+        SET whatsapp_number =
+            CASE
+                WHEN EXISTS (
+                    SELECT 1 FROM existing_link e
+                    WHERE e.user_id = u.user_id
+                )
+                THEN COALESCE(u.whatsapp_number, '[]'::jsonb)
+                ELSE COALESCE(u.whatsapp_number, '[]'::jsonb)
+                     || jsonb_build_array($3::text)
+            END
+        WHERE u.user_id = (SELECT user_id FROM device_owner)
+          AND NOT EXISTS (
+              SELECT 1
+              FROM existing_link e
+              WHERE e.user_id <> u.user_id
+          )
+        RETURNING u.user_id, u.whatsapp_number`,
+        [deviceId, last10, normalizedNumber],
+        (error, result) => {
+            if (error) {
+                return callback(error, null);
+            }
+            if (result.rows.length === 0) {
+                return callback(
+                    new Error(
+                        "Device not found, device has no owner, or this number belongs to another account"
+                    ),
+                    null
+                );
             }
             callback(null, result.rows[0]);
         }
     );
+}
+
+function registerWhatsappNumberByDevice(deviceId, productKey, whatsappNumber, callback) {
+    const digits = String(whatsappNumber || "").replace(/\D/g, "");
+    const last10 = digits.slice(-10);
+    if (!deviceId || !productKey || last10.length !== 10) {
+        const err = new Error("Invalid registration details");
+        err.code = "REGISTRATION_FAILED";
+        return callback(err, null);
+    }
+    const normalizedNumber = `+91${last10}`;
+    (async () => {
+        const client = await db.connect();
+        try {
+            await client.query("BEGIN");
+            await client.query(
+                "SELECT pg_advisory_xact_lock(hashtext($1))",
+                [last10]
+            );
+            const deviceResult = await client.query(
+                `SELECT user_id, product_key
+                 FROM devices
+                 WHERE device_id = $1
+                   AND user_id IS NOT NULL
+                 LIMIT 1`,
+                [deviceId]
+            );
+            if (deviceResult.rows.length === 0) {
+                const err = new Error("Registration failed");
+                err.code = "REGISTRATION_FAILED";
+                throw err;
+            }
+            const device = deviceResult.rows[0];
+            const isProductKeyValid = await bcrypt.compare(
+                productKey,
+                device.product_key || ""
+            );
+            if (!isProductKeyValid) {
+                const err = new Error("Registration failed");
+                err.code = "REGISTRATION_FAILED";
+                throw err;
+            }
+            const ownerUserId = device.user_id;
+            const existingResult = await client.query(
+                `SELECT u.user_id
+                 FROM users u
+                 CROSS JOIN LATERAL
+                     jsonb_array_elements_text(
+                         COALESCE(u.whatsapp_number, '[]'::jsonb)
+                     ) AS n(value)
+                 WHERE RIGHT(
+                     REGEXP_REPLACE(n.value, '[^0-9]', '', 'g'),
+                     10
+                 ) = $1
+                 LIMIT 1`,
+                [last10]
+            );
+            if (existingResult.rows.length > 0) {
+                const existingUserId = existingResult.rows[0].user_id;
+                if (String(existingUserId) !== String(ownerUserId)) {
+                    const err = new Error("Number already registered");
+                    err.code = "NUMBER_ALREADY_REGISTERED";
+                    throw err;
+                }
+                await client.query("COMMIT");
+                return {
+                    user_id: ownerUserId,
+                    alreadyRegistered: true
+                };
+            }
+            const updateResult = await client.query(
+                `UPDATE users
+                 SET whatsapp_number =
+                     COALESCE(whatsapp_number, '[]'::jsonb)
+                     || jsonb_build_array($1::text)
+                 WHERE user_id = $2
+                 RETURNING user_id, whatsapp_number`,
+                [normalizedNumber, ownerUserId]
+            );
+            if (updateResult.rows.length === 0) {
+                const err = new Error("Registration failed");
+                err.code = "REGISTRATION_FAILED";
+                throw err;
+            }
+            await client.query("COMMIT");
+            return updateResult.rows[0];
+        } catch (err) {
+            await client.query("ROLLBACK").catch(() => {});
+            throw err;
+        } finally {
+            client.release();
+        }
+    })()
+        .then((result) => callback(null, result))
+        .catch((err) => callback(err, null));
+}
+
+function deregisterWhatsappNumberByDevice(deviceId, productKey, whatsappNumber, callback) {
+    const digits = String(whatsappNumber || "").replace(/\D/g, "");
+    const last10 = digits.slice(-10);
+
+    if (!deviceId || !productKey || last10.length !== 10) {
+        const err = new Error("Invalid deregistration details");
+        err.code = "DEREGISTRATION_FAILED";
+        return callback(err, null);
+    }
+
+    (async () => {
+        const client = await db.connect();
+
+        try {
+            await client.query("BEGIN");
+
+            await client.query(
+                "SELECT pg_advisory_xact_lock(hashtext($1))",
+                [last10]
+            );
+
+            const deviceResult = await client.query(
+                `SELECT user_id, product_key
+                 FROM devices
+                 WHERE device_id = $1
+                   AND user_id IS NOT NULL
+                 LIMIT 1`,
+                [deviceId]
+            );
+
+            if (deviceResult.rows.length === 0) {
+                const err = new Error("Deregistration failed");
+                err.code = "DEREGISTRATION_FAILED";
+                throw err;
+            }
+
+            const device = deviceResult.rows[0];
+
+            const validProductKey = await bcrypt.compare(
+                productKey,
+                device.product_key || ""
+            );
+
+            if (!validProductKey) {
+                const err = new Error("Deregistration failed");
+                err.code = "DEREGISTRATION_FAILED";
+                throw err;
+            }
+
+            const ownerUserId = device.user_id;
+
+            const numberResult = await client.query(
+                `SELECT user_id
+                 FROM users
+                 WHERE user_id = $1
+                   AND EXISTS (
+                       SELECT 1
+                       FROM jsonb_array_elements_text(
+                           COALESCE(whatsapp_number, '[]'::jsonb)
+                       ) AS n(value)
+                       WHERE RIGHT(
+                           REGEXP_REPLACE(n.value, '[^0-9]', '', 'g'),
+                           10
+                       ) = $2
+                   )
+                 FOR UPDATE`,
+                [ownerUserId, last10]
+            );
+
+            if (numberResult.rows.length === 0) {
+                const err = new Error("Deregistration failed");
+                err.code = "NUMBER_NOT_LINKED";
+                throw err;
+            }
+
+            await client.query(
+                `UPDATE users
+                 SET whatsapp_number = (
+                     SELECT COALESCE(
+                         jsonb_agg(n.value),
+                         '[]'::jsonb
+                     )
+                     FROM jsonb_array_elements_text(
+                         COALESCE(whatsapp_number, '[]'::jsonb)
+                     ) AS n(value)
+                     WHERE RIGHT(
+                         REGEXP_REPLACE(n.value, '[^0-9]', '', 'g'),
+                         10
+                     ) <> $1
+                 )
+                 WHERE user_id = $2`,
+                [last10, ownerUserId]
+            );
+
+            await client.query("COMMIT");
+
+            return { success: true };
+
+        } catch (err) {
+            await client.query("ROLLBACK").catch(() => {});
+            throw err;
+
+        } finally {
+            client.release();
+        }
+    })()
+        .then(result => callback(null, result))
+        .catch(err => callback(err, null));
 }
 
 module.exports = {
@@ -1614,7 +1955,9 @@ module.exports = {
     resetChannelEnergy,
     getStaleLoadHistoryDates,
     getUserByWhatsapp,
-    linkWhatsappNumberToDevice
+    linkWhatsappNumberToDevice,
+    registerWhatsappNumberByDevice,
+    deregisterWhatsappNumberByDevice
 };
 
 async function migrateMeasurementColumnTypes() {

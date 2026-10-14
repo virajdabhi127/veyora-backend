@@ -20,20 +20,13 @@ With Veyora, you can:
 Visit our website to explore our products, learn about their features, and discover how Veyora can help you manage your energy smarter.
 🔗 https://veyora.in
 
-Let's make energy smarter! 🚀
+Let's make energy smarter! 🚀`;
 
-📝 Note (for existing customers): If you want to change your registered mobile number, enter your Device ID to continue.`;
-
-const DEVICE_VERIFIED_TEXT = `🔐 Device Verification
-Your Device ID has been received.
+const DEVICE_VERIFIED_TEXT = `Your Device ID has been received.
 Please enter the Product Key associated with your Veyora device to verify ownership and continue with mobile registration.`;
 
 const REGISTRATION_SUCCESS_TEXT = `✅ Mobile Number Registered Successfully!
-Your WhatsApp number has been registered with your Veyora device.
-You can now use WhatsApp to access your Veyora services.
-
-Welcome aboard! ⚡
-Veyora — Smarter Energy. Better Living.`;
+You can now use WhatsApp to access your Veyora services.`;
 
 router.get("/", (req, res) => {
     const mode = req.query["hub.mode"];
@@ -54,7 +47,6 @@ router.post("/", (req, res) => {
     const value = change?.value;
     const messages = value?.messages;
     if (!messages || messages.length === 0) {
-        console.log("Webhook received without incoming messages.");
         return;
     }
     for (const msg of messages) {
@@ -78,19 +70,101 @@ router.post("/", (req, res) => {
             continue;
         }
         const body = rawBody.toLowerCase();
-        console.log(`SENDER: ${from} | TYPE: ${type} | MESSAGE: "${rawBody}"`);
         handleIncomingMessage(from, rawBody, body);
     }
 });
 
 function handleIncomingMessage(from, rawBody, body) {
+    if (body === "cancel") {
+        if (pendingVerifications.has(from)) {
+            pendingVerifications.delete(from);
+            sendTextMessage(
+                from,
+                "Operation cancelled. No changes have been made.\n\nSend HI whenever you're ready to start again."
+            ).catch(() => {});
+            return;
+        }
+    }
     db.getUserByWhatsapp(from, (err, user) => {
         if (err) {
             console.error("DB lookup error:", err.message);
             return;
         }
+        const pending = pendingVerifications.get(from);
+        if (pending && pending.step === "awaiting_deregister_device_id") {
+            if (Date.now() - pending.lastActivity > 3 * 60 * 1000) {
+                pendingVerifications.delete(from);
+                sendTextMessage(
+                    from,
+                    "⌛ Your deregistration session has expired.\n\nSend DEREGISTER to try again."
+                ).catch(() => {});
+                return;
+            }
+            const deviceId = rawBody.trim();
+            pendingVerifications.set(from, {
+                step: "awaiting_deregister_product_key",
+                deviceId,
+                lastActivity: Date.now()
+            });
+            sendTextMessage(
+                from,
+                "🔐 Please enter the Product Key associated with your device to verify ownership."
+            ).catch(() => {});
+            return;
+        }
+        if (pending && pending.step === "awaiting_deregister_product_key") {
+            if (Date.now() - pending.lastActivity > 3 * 60 * 1000) {
+                pendingVerifications.delete(from);
+                sendTextMessage(
+                    from,
+                    "⌛ Your deregistration session has expired.\n\nSend DEREGISTER to try again."
+                ).catch(() => {});
+                return;
+            }
+            const productKey = rawBody.trim();
+            db.deregisterWhatsappNumberByDevice(
+                pending.deviceId,
+                productKey,
+                from,
+                (err, result) => {
+                    if (err) {
+                        if (err.code === "DEREGISTRATION_FAILED" || err.code === "NUMBER_NOT_LINKED") {
+                            pendingVerifications.delete(from);
+                            sendTextMessage(
+                                from,
+                                "❌ Verification failed. Please check your Device ID and Product Key, or contact Veyora Support."
+                            ).catch(() => {});
+                            return;
+                        }
+                        console.error("WhatsApp deregistration database error:", err.message);
+                        sendTextMessage(
+                            from,
+                            "⚠️ We're experiencing a temporary issue. Please try again later."
+                        ).catch(() => {});
+                        return;
+                    }
+                    pendingVerifications.delete(from);
+                    sendTextMessage(
+                        from,
+                        "✅ WhatsApp Number Deregistered Successfully!"
+                    ).catch(() => {});
+                }
+            );
+            return;
+        }
+
         if (user) {
-            // Registered number — existing menu flow
+            if (body === "deregister") {
+                pendingVerifications.set(from, {
+                    step: "awaiting_deregister_device_id",
+                    lastActivity: Date.now()
+                });
+                sendTextMessage(
+                    from,
+                    "📱 Veyora Number Deregistration\n\nPlease enter your Device ID to continue.\n\nSend CANCEL anytime to stop."
+                ).catch(() => {});
+                return;
+            }
             if (body === "hi" || body === "hello") {
                 handleGreeting(from, user);
             } else if (body === "explore") {
@@ -102,7 +176,6 @@ function handleIncomingMessage(from, rawBody, body) {
             }
             return;
         }
-        // Unregistered number — verification flow
         handleUnregisteredFlow(from, rawBody);
     });
 }
@@ -120,68 +193,109 @@ function handleGreeting(from, user) {
 }
 
 function handleUnregisteredFlow(from, rawBody) {
-    const pending = pendingVerifications.get(from);
+    const message = String(rawBody || "").trim();
+    const command = message.toLowerCase();
+    let pending = pendingVerifications.get(from);
+    if (pending && Date.now() - pending.lastActivity > 3 * 60 * 1000) {
+        pendingVerifications.delete(from);
+        pending = null;
+        sendTextMessage(
+            from,
+            "⌛ Your registration session has expired because there was no activity for 3 minutes.\n\nSend REGISTER to start again."
+        ).catch(() => {});
+        return;
+    }
     if (!pending) {
-        // First contact — send welcome, start the flow
-        pendingVerifications.set(from, { step: "awaiting_device_id" });
+        if (command === "register") {
+            pendingVerifications.set(from, {
+                step: "awaiting_device_id",
+                lastActivity: Date.now()
+            });
+            sendTextMessage(
+                from,
+                "📱 Veyora Mobile Number Registration\n\nPlease enter your Device ID to continue.\n\nSend CANCEL anytime to stop."
+            ).catch((e) => console.error("Registration prompt error:", e.message));
+            return;
+        }
         sendTextMessage(from, WELCOME_TEXT).catch((e) =>
             console.error("Welcome send error:", e.message)
         );
         return;
     }
+    pending.lastActivity = Date.now();
+    pendingVerifications.set(from, pending);
     if (pending.step === "awaiting_device_id") {
-        const deviceId = rawBody; // device IDs are case-sensitive, keep raw
+        const deviceId = message;
         db.getDevice(deviceId, (err, device) => {
             if (err) {
                 console.error("Device lookup error:", err.message);
+                sendTextMessage(
+                    from,
+                    "⚠️ We're experiencing a temporary issue. Please try again."
+                ).catch(() => {});
                 return;
             }
             if (!device) {
                 sendTextMessage(
                     from,
-                    "❌ Device ID not found. Please check and enter your Device ID again."
-                ).catch((e) => console.error("Send error:", e.message));
-                return; // stay on awaiting_device_id, let them retry
+                    "❌ Device ID not found. Please check your Device ID and enter it again.\n\nSend CANCEL to stop."
+                ).catch(() => {});
+                return;
             }
             pendingVerifications.set(from, {
                 step: "awaiting_product_key",
                 deviceId,
+                lastActivity: Date.now()
             });
             sendTextMessage(from, DEVICE_VERIFIED_TEXT).catch((e) =>
-                console.error("Send error:", e.message)
+                console.error("Device verification prompt error:", e.message)
             );
         });
         return;
     }
     if (pending.step === "awaiting_product_key") {
-        const productKey = rawBody;
-        db.getDevice(pending.deviceId, (err, device) => {
-            if (err) {
-                console.error("Device lookup error:", err.message);
-                return;
-            }
-            if (!device || device.product_key !== productKey) {
-                sendTextMessage(
-                    from,
-                    "❌ Incorrect Product Key. Please try again."
-                ).catch((e) => console.error("Send error:", e.message));
-                return; // stay on awaiting_product_key, let them retry
-            }
-            db.linkWhatsappNumberToDevice(pending.deviceId, from, (linkErr) => {
-                if (linkErr) {
-                    console.error("Linking error:", linkErr.message);
+        const productKey = message;
+        db.registerWhatsappNumberByDevice(
+            pending.deviceId,
+            productKey,
+            from,
+            (err, result) => {
+                if (err) {
+                    if (err.code === "NUMBER_ALREADY_REGISTERED") {
+                        pendingVerifications.delete(from);
+                        sendTextMessage(
+                            from,
+                            "📱 This mobile number is already registered with an active Veyora account.\n\nIf you need assistance, please contact Veyora Support."
+                        ).catch(() => {});
+                        return;
+                    }
+                    if (err.code === "REGISTRATION_FAILED") {
+                        pendingVerifications.delete(from);
+                        sendTextMessage(
+                            from,
+                            "❌ Registration failed. Please check your Device ID and Product Key, then send REGISTER to try again."
+                        ).catch(() => {});
+                        return;
+                    }
+                    console.error(
+                        "WhatsApp registration database error:",
+                        err.message
+                    );
                     sendTextMessage(
                         from,
-                        "⚠️ Something went wrong linking your number. Please try again later."
+                        "⚠️ We're experiencing a temporary issue. Please try again later."
                     ).catch(() => {});
                     return;
                 }
                 pendingVerifications.delete(from);
-                sendTextMessage(from, REGISTRATION_SUCCESS_TEXT).catch((e) =>
-                    console.error("Send error:", e.message)
+                sendTextMessage(
+                    from,
+                    REGISTRATION_SUCCESS_TEXT
+                ).catch((e) =>
+                    console.error("Registration success message error:", e.message)
                 );
-            });
-        });
+            }
+        );
         return;
     }
 }
