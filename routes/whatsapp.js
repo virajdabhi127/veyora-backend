@@ -4,6 +4,9 @@ const { sendButtonMenu, sendTextMessage } = require("../services/whatsappService
 const router = express.Router();
 const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
 const pendingVerifications = new Map();
+const recentLeads = new Map();
+
+const LEAD_MARKER = "i would like to know more about the smart energy monitor";
 
 const WELCOME_TEXT = `Welcome to Veyora!
 Smarter Energy. Better Living. ⚡
@@ -84,6 +87,10 @@ function handleIncomingMessage(from, rawBody, body) {
             ).catch(() => {});
             return;
         }
+    }
+    if (isLeadMessage(rawBody)) {
+        handleLead(from, rawBody);
+        return;
     }
     db.getUserByWhatsapp(from, (err, user) => {
         if (err) {
@@ -297,6 +304,49 @@ function handleUnregisteredFlow(from, rawBody) {
             }
         );
         return;
+    }
+}
+
+function isLeadMessage(rawBody) {
+    return rawBody.toLowerCase().includes(LEAD_MARKER);
+}
+
+function parseLead(rawBody) {
+    const get = (label) => {
+        const m = rawBody.match(new RegExp(`^${label}:\\s*(.+)$`, "im"));
+        return m ? m[1].trim() : "-";
+    };
+    return {
+        name: get("Name"),
+        formPhone: get("Phone"),
+        installType: get("Install at"),
+        monthlyBill: get("Monthly bill"),
+    };
+}
+
+function handleLead(from, rawBody) {
+    const last = recentLeads.get(from);
+    if (last && Date.now() - last < 10 * 60 * 1000) return;
+    recentLeads.set(from, Date.now());
+    const lead = parseLead(rawBody);
+    sendTextMessage(
+        from,
+        "Thank you for reaching out to us!\n\nOur customer executive will contact you within 24 hours."
+    ).catch(() => {});
+
+    const adminNumber = process.env.ADMIN_WHATSAPP;
+    if (adminNumber) {
+        sendTextMessage(
+            adminNumber,
+            `🔔 New Veyora Lead\n\n` +
+            `Name: ${lead.name}\n` +
+            `WhatsApp: +${from}\n` +
+            `Phone (form): ${lead.formPhone}\n` +
+            `Install at: ${lead.installType}\n` +
+            `Monthly bill: ${lead.monthlyBill}`
+        ).catch(() => {});
+    } else {
+        console.error("ADMIN_WHATSAPP is not set in .env");
     }
 }
 

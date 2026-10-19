@@ -109,16 +109,26 @@ router.delete("/user/:userid", (req, res) => {
             message: "You cannot delete your own account."
         });
     }
-    database.deleteUser(userid, (err) => {
+    database.deleteUser(userid, (err, deviceIds = []) => {
         if (err) {
-            return res.status(500).json({
-                success: false,
-                message: "Database error."
-            });
+            if (err.code === "USER_NOT_FOUND") {
+                return res.status(404).json({ success: false, message: err.message });
+            }
+            console.error(`Delete user ${userid} failed:`, err.code, err.message, err.detail);
+            return res.status(500).json({ success: false, message: "Database error." });
+        }
+        for (const deviceId of deviceIds) {
+            mqtt.latestDevices.delete(deviceId);
+            mqtt.pendingWiFiRequests?.delete(deviceId);
+            mqtt.lastDatabaseSave?.delete(deviceId);
+            mqtt.lastLoadHistorySave?.delete(deviceId);
+            mqtt.dailyLoadFinalized?.delete(deviceId);
         }
         res.json({
             success: true,
-            message: "User deleted successfully."
+            message: deviceIds.length
+                ? `User and ${deviceIds.length} device(s) deleted successfully.`
+                : "User deleted successfully."
         });
     });
 });

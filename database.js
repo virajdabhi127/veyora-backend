@@ -779,43 +779,110 @@ function getAllUsers(callback) {
     );
 }
 
+const DEVICE_DEPENDENT_TABLES = [
+    "device_channels",
+    "energy_history",
+    "energy_daily_history",
+    "energy_monthly_history",
+    "load_history",
+    "load_daily_history",
+    "load_history_batches"
+];
+
 function deleteUser(userid, callback) {
-    db.query(
-        `DELETE FROM users
-         WHERE userid = $1`,
-        [userid],
-        callback
-    );
+    (async () => {
+        const client = await db.connect();
+        try {
+            await client.query("BEGIN");
+            const userResult = await client.query(
+                `SELECT user_id FROM users WHERE userid = $1 FOR UPDATE`,
+                [userid]
+            );
+            if (userResult.rows.length === 0) {
+                const err = new Error("User not found.");
+                err.code = "USER_NOT_FOUND";
+                throw err;
+            }
+            const id = userResult.rows[0].user_id;
+            const deviceResult = await client.query(
+                `SELECT device_id FROM devices WHERE user_id = $1`,
+                [id]
+            );
+            const deviceIds = deviceResult.rows.map((r) => r.device_id);
+            if (deviceIds.length > 0) {
+                for (const table of DEVICE_DEPENDENT_TABLES) {
+                    await client.query(
+                        `DELETE FROM ${table} WHERE device_id = ANY($1::text[])`,
+                        [deviceIds]
+                    );
+                }
+                await client.query(
+                    `DELETE FROM devices WHERE device_id = ANY($1::text[])`,
+                    [deviceIds]
+                );
+            }
+            await client.query(`DELETE FROM users WHERE user_id = $1`, [id]);
+            await client.query("COMMIT");
+            return deviceIds;
+        } catch (err) {
+            await client.query("ROLLBACK").catch(() => {});
+            throw err;
+        } finally {
+            client.release();
+        }
+    })()
+        .then((deviceIds) => callback(null, deviceIds))
+        .catch((err) => callback(err));
 }
 
 function updateUser(userid, username, password, role, whatsappNumber, callback) {
-    if (!password) {
+    const digits = String(whatsappNumber || "").replace(/\D/g, "");
+    const last10 = digits.slice(-10);
+    if (whatsappNumber && last10.length !== 10) {
+        return callback(new Error("Invalid WhatsApp number."));
+    }
+    const normalized = last10 ? `+91${last10}` : null;
+    const runUpdate = (hash) => {
         db.query(
-            `UPDATE users
+            `UPDATE users u
              SET username = $1,
-                 role = $2,
-                 whatsapp_number = $3
-             WHERE userid = $4`,
-            [username, role, whatsappNumber || null, userid],
+                 password = COALESCE($2, u.password),
+                 role = $3,
+                 whatsapp_number = CASE
+                     WHEN $4::text IS NULL THEN u.whatsapp_number
+                     WHEN EXISTS (
+                         SELECT 1
+                         FROM jsonb_array_elements_text(u.whatsapp_number) AS n(value)
+                         WHERE RIGHT(REGEXP_REPLACE(n.value, '[^0-9]', '', 'g'), 10) = $5::text
+                     ) THEN u.whatsapp_number
+                     ELSE u.whatsapp_number || jsonb_build_array($4::text)
+                 END
+             WHERE u.userid = $6`,
+            [username, hash || null, role, normalized, last10 || null, userid],
             callback
         );
-    } else {
-        bcrypt.hash(password, 10, (err, hash) => {
-            if (err) {
-                return callback(err);
+    };
+    const proceed = () => {
+        if (!password) return runUpdate(null);
+        bcrypt.hash(password, 10, (err, hash) => (err ? callback(err) : runUpdate(hash)));
+    };
+    if (!normalized) return proceed();
+    db.query(
+        `SELECT 1
+         FROM users u
+         CROSS JOIN LATERAL jsonb_array_elements_text(u.whatsapp_number) AS n(value)
+         WHERE u.userid <> $1
+           AND RIGHT(REGEXP_REPLACE(n.value, '[^0-9]', '', 'g'), 10) = $2
+         LIMIT 1`,
+        [userid, last10],
+        (err, result) => {
+            if (err) return callback(err);
+            if (result.rows.length > 0) {
+                return callback(new Error("This mobile number is already registered with another Veyora account."));
             }
-            db.query(
-                `UPDATE users
-                 SET username = $1,
-                     password = $2,
-                     role = $3,
-                     whatsapp_number = $4
-                 WHERE userid = $5`,
-                [username, hash, role, whatsappNumber || null, userid],
-                callback
-            );
-        });
-    }
+            proceed();
+        }
+    );
 }
 
 function updatedevice(deviceId, userId, productCode, channelCount, callback) {
@@ -871,16 +938,7 @@ function deleteDevice(deviceId, callback) {
         }
         try {
             await client.query("BEGIN");
-            const dependentTables = [
-                "device_channels",
-                "energy_history",
-                "energy_daily_history",
-                "energy_monthly_history",
-                "load_history",
-                "load_daily_history",
-                "load_history_batches"
-            ];
-            for (const table of dependentTables) {
+            for (const table of DEVICE_DEPENDENT_TABLES) {
                 await client.query(`DELETE FROM ${table} WHERE device_id = $1`, [deviceId]);
             }
             const result = await client.query(
