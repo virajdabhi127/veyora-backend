@@ -6,6 +6,8 @@ const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
 const pendingVerifications = new Map();
 const recentLeads = new Map();
 
+const FALLBACK_TEXT = 'Send "Hi" to continue.';
+
 const LEAD_MARKER = "i would like to know more about the smart energy monitor";
 
 const WELCOME_TEXT = `Welcome to Veyora!
@@ -68,8 +70,11 @@ router.post("/", (req, res) => {
                 rawBody = interactive.list_reply?.id || "";
             }
             rawBody = rawBody.trim();
+        } else if (type === "reaction") {
+            continue;
         } else {
             console.log(`Unsupported message type: ${type} from ${from}`);
+            sendTextMessage(from, FALLBACK_TEXT).catch(() => {});
             continue;
         }
         const body = rawBody.toLowerCase();
@@ -172,7 +177,7 @@ function handleIncomingMessage(from, rawBody, body) {
                 ).catch(() => {});
                 return;
             }
-            if (body === "hi" || body === "hello") {
+            if (isGreeting(body)) {
                 handleGreeting(from, user);
             } else if (body === "explore") {
                 console.log(`Explore selected by ${from}`);
@@ -180,6 +185,8 @@ function handleIncomingMessage(from, rawBody, body) {
                 console.log(`Support selected by ${from}`);
             } else if (body === "my_devices") {
                 console.log(`My Devices selected by ${from}`);
+            } else {
+                sendTextMessage(from, FALLBACK_TEXT).catch(() => {});
             }
             return;
         }
@@ -224,10 +231,14 @@ function handleUnregisteredFlow(from, rawBody) {
             ).catch((e) => console.error("Registration prompt error:", e.message));
             return;
         }
-        sendTextMessage(from, WELCOME_TEXT).catch((e) =>
-            console.error("Welcome send error:", e.message)
-        );
-        return;
+        if (isGreeting(command)) {
+            sendTextMessage(from, WELCOME_TEXT).catch((e) =>
+                console.error("Welcome send error:", e.message)
+            );
+            return;
+        }
+    sendTextMessage(from, FALLBACK_TEXT).catch(() => {});
+    return;
     }
     pending.lastActivity = Date.now();
     pendingVerifications.set(from, pending);
@@ -348,6 +359,10 @@ function handleLead(from, rawBody) {
     } else {
         console.error("ADMIN_WHATSAPP is not set in .env");
     }
+}
+
+function isGreeting(body) {
+    return /^(hi|hello|hey)[\s!.]*$/.test(body);
 }
 
 module.exports = router;
