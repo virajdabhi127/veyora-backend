@@ -1,6 +1,7 @@
 const express = require("express");
 const db = require("../database");
 const { sendButtonMenu, sendTextMessage } = require("../services/whatsappService");
+const { sendLeadEmail } = require("../services/emailService");
 const router = express.Router();
 const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
 const pendingVerifications = new Map();
@@ -23,7 +24,7 @@ With Veyora, you can:
 
 🌐 Discover Veyora!
 Visit our website to explore our products, learn about their features, and discover how Veyora can help you manage your energy smarter.
-🔗 https://veyora.in
+🔗 https://veyora.in/energy-monitor
 
 Let's make energy smarter! 🚀`;
 
@@ -344,21 +345,9 @@ function handleLead(from, rawBody) {
         from,
         "Thank you for reaching out to us!\n\nOur customer executive will contact you within 24 hours."
     ).catch(() => {});
-
-    const adminNumber = process.env.ADMIN_WHATSAPP;
-    if (adminNumber) {
-        sendTextMessage(
-            adminNumber,
-            `🔔 New Veyora Lead\n\n` +
-            `Name: ${lead.name}\n` +
-            `WhatsApp: +${from}\n` +
-            `Phone (form): ${lead.formPhone}\n` +
-            `Install at: ${lead.installType}\n` +
-            `Monthly bill: ${lead.monthlyBill}`
-        ).catch(() => {});
-    } else {
-        console.error("ADMIN_WHATSAPP is not set in .env");
-    }
+    sendLeadEmail(lead, from).catch((e) =>
+        console.error("Lead email failed:", e.message)
+    );
 }
 
 function isGreeting(body) {
