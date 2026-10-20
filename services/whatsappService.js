@@ -119,4 +119,34 @@ async function sendTextMessage(to, text) {
   }
 }
 
-module.exports = { sendWelcomeMessage, sendTemplate, sendButtonMenu, sendTextMessage };
+async function sendCatalogMessage(to, bodyText) {
+  const payload = {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'catalog_message',
+      body: { text: bodyText },
+      footer: { text: 'Veyora - Smarter Energy. Better Living.' },
+      action: { 
+        name: 'catalog_message',
+      },
+    },
+  };
+  try {
+    const res = await axios.post(WHATSAPP_API_URL, payload, {
+      headers: {
+        Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+    });
+    return { success: true, id: res.data?.messages?.[0]?.id };
+  } catch (err) {
+    const detail = err.response?.data || err.message;
+    console.error(`Catalog send failed for ${to}:`, JSON.stringify(detail));
+    return { success: false, error: detail };
+  }
+}
+
+module.exports = { sendWelcomeMessage, sendTemplate, sendButtonMenu, sendTextMessage, sendCatalogMessage };

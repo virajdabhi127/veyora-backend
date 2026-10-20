@@ -21,11 +21,15 @@ async function sendLeadEmail(lead, from) {
         to,
         subject: `New Veyora Lead: ${lead.name}`,
         text:
-            `Name: ${lead.name}\n\n` +
-            `WhatsApp: +${from}\n\n` +
-            `Phone (form): ${lead.formPhone}\n\n` +
-            `Install at: ${lead.installType}\n\n` +
-            `Monthly bill: ${lead.monthlyBill}\n\n`,
+            `Source: ${lead.source || "Website form"}\n` +
+            `Name: ${lead.name}${lead.nameNote ? ` (${lead.nameNote})` : ""}\n` +
+            `WhatsApp: +${from}\n` +
+            `Tap to chat: https://wa.me/${from}\n` +
+            (lead.formPhone ? `Phone (form): ${lead.formPhone}\n` : "") +
+            (lead.installType ? `Install at: ${lead.installType}\n` : "") +
+            (lead.monthlyBill ? `Monthly bill: ${lead.monthlyBill}\n` : "") +
+            (lead.orderItems ? `Ordered: ${lead.orderItems}\n` : "") +
+            (lead.note ? `Customer note: ${lead.note}\n` : ""),
     });
 }
 

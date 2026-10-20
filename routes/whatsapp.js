@@ -1,32 +1,38 @@
 const express = require("express");
 const db = require("../database");
-const { sendButtonMenu, sendTextMessage } = require("../services/whatsappService");
+const { sendButtonMenu, sendTextMessage, sendCatalogMessage } = require("../services/whatsappService");
 const { sendLeadEmail } = require("../services/emailService");
 const router = express.Router();
 const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
 const pendingVerifications = new Map();
-const recentLeads = new Map();
+const enquiries = new Map(); 
+const ENQUIRY_WINDOW_MS = 24 * 60 * 60 * 1000;
+const pendingOrders = new Map();
+const NAME_NUDGE_MS = 5 * 60 * 1000;
+const NAME_FINAL_MS = 15 * 60 * 1000;
+
+const NAME_QUESTION_TEXT = "Thanks for your interest in the Veyora Energy Monitor! 😊\n\nMay I know your name so our customer executive can address you properly?";
+
+const NAME_NUDGE_TEXT = "Just checking in 🙂 We're waiting for your name to complete your enquiry. Please reply with it whenever you're ready.";
+
+const PRODUCT_NAMES = { oah2r3vifc: "Veyora Energy Monitor (4 Channel)", };
 
 const FALLBACK_TEXT = 'Send "Hi" to continue.';
 
 const LEAD_MARKER = "i would like to know more about the smart energy monitor";
 
-const WELCOME_TEXT = `Welcome to Veyora!
-Smarter Energy. Better Living. ⚡
+const ENQUIRY_THANKS_TEXT = "Thank you for reaching out to us!\n\nOur customer executive will contact you within 24 hours.";
 
-Veyora helps you monitor your electricity consumption, understand your energy usage, identify energy-saving opportunities, and make smarter decisions about your electricity consumption.
+const ENQUIRY_EXISTS_TEXT = "You have already started an enquiry with us.\n\nKindly wait for our customer executive to contact you.";
 
-With Veyora, you can:
-⚡ Monitor energy consumption in real time.
-📊 Analyse your electricity usage.
-💡 Discover opportunities to save energy.
-📈 Track your energy consumption history.
+const WELCOME_TEXT = `Welcome to Veyora! ⚡
+Smarter Energy. Better Living.
 
-🌐 Discover Veyora!
-Visit our website to explore our products, learn about their features, and discover how Veyora can help you manage your energy smarter.
-🔗 https://veyora.in/energy-monitor
+Veyora builds smart energy solutions that help homes and businesses understand their electricity usage and make smarter decisions about it.
 
-Let's make energy smarter! 🚀`;
+🌐 Know more about us: https://veyora.in
+
+Browse our products below 👇`;
 
 const DEVICE_VERIFIED_TEXT = `Your Device ID has been received.
 Please enter the Product Key associated with your Veyora device to verify ownership and continue with mobile registration.`;
@@ -73,6 +79,21 @@ router.post("/", (req, res) => {
             rawBody = rawBody.trim();
         } else if (type === "reaction") {
             continue;
+        } else if (type === "order") {
+            if (!claimEnquiry(from)) continue;
+            const items = (msg.order?.product_items || [])
+                .map((i) => `${i.quantity} x ${PRODUCT_NAMES[i.product_retailer_id] || i.product_retailer_id} (₹${i.item_price})`)
+                .join(", ");
+            holdOrder(
+                from,
+                {
+                    source: "WhatsApp catalog order",
+                    orderItems: items || "-",
+                    note: msg.order?.text || "",
+                },
+                value?.contacts?.[0]?.profile?.name
+            );
+            continue;
         } else {
             console.log(`Unsupported message type: ${type} from ${from}`);
             sendTextMessage(from, FALLBACK_TEXT).catch(() => {});
@@ -94,13 +115,21 @@ function handleIncomingMessage(from, rawBody, body) {
             return;
         }
     }
-    if (isLeadMessage(rawBody)) {
-        handleLead(from, rawBody);
+    if (pendingOrders.has(from) && rawBody) {
+        completeOrder(from, rawBody);
         return;
     }
     db.getUserByWhatsapp(from, (err, user) => {
         if (err) {
             console.error("DB lookup error:", err.message);
+            return;
+        }
+        if (isLeadMessage(rawBody)) {
+            if (user) {
+                handleGreeting(from, user);
+            } else {
+                handleLead(from, rawBody);
+            }
             return;
         }
         const pending = pendingVerifications.get(from);
@@ -181,7 +210,7 @@ function handleIncomingMessage(from, rawBody, body) {
             if (isGreeting(body)) {
                 handleGreeting(from, user);
             } else if (body === "explore") {
-                console.log(`Explore selected by ${from}`);
+                sendCatalogMessage(from, "Browse the Veyora catalog 👇").catch(() => {});
             } else if (body === "support") {
                 console.log(`Support selected by ${from}`);
             } else if (body === "my_devices") {
@@ -232,10 +261,16 @@ function handleUnregisteredFlow(from, rawBody) {
             ).catch((e) => console.error("Registration prompt error:", e.message));
             return;
         }
+        if (command === "catalog") {
+            sendCatalogMessage(from, "Browse the Veyora catalog 👇").catch(() => {});
+            return;
+        }
         if (isGreeting(command)) {
-            sendTextMessage(from, WELCOME_TEXT).catch((e) =>
-                console.error("Welcome send error:", e.message)
-            );
+            sendTextMessage(from, WELCOME_TEXT)
+                .then(() =>
+                    sendCatalogMessage(from, "Tap *View catalogue* to see our products and prices.")
+                )
+                .catch((e) => console.error("Welcome/catalog send error:", e.message));
             return;
         }
     sendTextMessage(from, FALLBACK_TEXT).catch(() => {});
@@ -336,22 +371,69 @@ function parseLead(rawBody) {
     };
 }
 
-function handleLead(from, rawBody) {
-    const last = recentLeads.get(from);
-    if (last && Date.now() - last < 10 * 60 * 1000) return;
-    recentLeads.set(from, Date.now());
-    const lead = parseLead(rawBody);
+function holdOrder(from, lead, profileName) {
+    pendingOrders.set(from, {
+        lead,
+        profileName,
+        nudgeTimer: setTimeout(() => {
+            sendTextMessage(from, NAME_NUDGE_TEXT).catch(() => {});
+        }, NAME_NUDGE_MS),
+        finalTimer: setTimeout(() => completeOrder(from, null), NAME_FINAL_MS),
+    });
+    sendTextMessage(from, NAME_QUESTION_TEXT).catch(() => {});
+}
+
+function completeOrder(from, typedName) {
+    const pending = pendingOrders.get(from);
+    if (!pending) return;
+    clearTimeout(pending.nudgeTimer);
+    clearTimeout(pending.finalTimer);
+    pendingOrders.delete(from);
+    const name = typedName
+        ? typedName.replace(/\s+/g, " ").trim().slice(0, 60)
+        : null;
+    const lead = {
+        ...pending.lead,
+        name: name || pending.profileName || "-",
+        nameNote: name
+            ? "typed by customer, not verified"
+            : "customer did not give a name; this is their WhatsApp profile name",
+    };
     sendTextMessage(
         from,
-        "Thank you for reaching out to us!\n\nOur customer executive will contact you within 24 hours."
+        name
+            ? `Thank you for reaching out to us, ${name} !\n\nOur customer executive will contact you within 24 hours.`
+            : ENQUIRY_THANKS_TEXT
     ).catch(() => {});
+    sendLeadEmail(lead, from).catch((e) =>
+        console.error("Order email failed:", e.message)
+    );
+}
+
+function claimEnquiry(from) {
+    const last = enquiries.get(from);
+    if (last && Date.now() - last < ENQUIRY_WINDOW_MS) {
+        sendTextMessage(from, ENQUIRY_EXISTS_TEXT).catch(() => {});
+        return false;
+    }
+    enquiries.set(from, Date.now());
+    return true;
+}
+
+function registerEnquiry(from, lead) {
+    if (!claimEnquiry(from)) return;
+    sendTextMessage(from, ENQUIRY_THANKS_TEXT).catch(() => {});
     sendLeadEmail(lead, from).catch((e) =>
         console.error("Lead email failed:", e.message)
     );
 }
 
+function handleLead(from, rawBody) {
+    registerEnquiry(from, { source: "Website form", ...parseLead(rawBody) });
+}
+
 function isGreeting(body) {
-    return /^(hi|hello|hey)[\s!.]*$/.test(body);
+    return /^(hi|hello|hey|hii)[\s!.]*$/.test(body);
 }
 
 module.exports = router;
