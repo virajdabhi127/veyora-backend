@@ -30,7 +30,7 @@ Smarter Energy. Better Living.
 
 Veyora builds smart energy solutions that help homes and businesses understand their electricity usage and make smarter decisions about it.
 
-🌐 Know more about us: https://veyora.in
+🌐 Know more about us: https://veyora.in/energy-monitor
 
 Browse our products below 👇`;
 
