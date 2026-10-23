@@ -974,6 +974,17 @@ function getAdminStats(callback) {
     );
 }
 
+function shiftDailyBaseline(deviceId, delta, callback) {
+    db.query(
+        `UPDATE energy_daily_history
+         SET start_energy_kwh = start_energy_kwh + $3
+         WHERE device_id = $1
+           AND history_date = $2`,
+        [deviceId, getISTDate(), delta],
+        callback
+    );
+}
+
 function getDailyEnergy(deviceId, callback) {
     const query = `
         SELECT
@@ -2015,7 +2026,8 @@ module.exports = {
     getUserByWhatsapp,
     linkWhatsappNumberToDevice,
     registerWhatsappNumberByDevice,
-    deregisterWhatsappNumberByDevice
+    deregisterWhatsappNumberByDevice,
+    shiftDailyBaseline
 };
 
 async function migrateMeasurementColumnTypes() {

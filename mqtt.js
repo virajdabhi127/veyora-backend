@@ -527,7 +527,7 @@ function setEnergy(deviceId, energyKWh) {
             action: "set_energy",
             energyKWh: Number(energyKWh)
         });
-        client.publish(topic, payload, (err) => {
+        client.publish(topic, payload, { qos: 1 }, (err) => {
             if (err) {
                 reject(err);
                 return;

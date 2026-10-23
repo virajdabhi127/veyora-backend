@@ -213,20 +213,38 @@ router.post("/device/:deviceId/set-energy", (req, res) => {
                 message: "Device is offline. Cannot send energy update."
             });
         }
-        mqtt.setEnergy(deviceId, value)
-            .then(() => {
-                res.json({
-                    success: true,
-                    message: "Energy update sent to device."
-                });
-            })
-            .catch((err) => {
-                console.error("Set energy error:", err.message);
-                res.status(500).json({
+        const oldTotal = Number(deviceData.energyKWh) || 0;
+        const delta = value - oldTotal;
+        database.shiftDailyBaseline(deviceId, delta, (dbErr, result) => {   // result added
+            if (dbErr) {
+                console.error("Baseline shift error:", dbErr.message);
+                return res.status(500).json({
                     success: false,
-                    message: "Failed to send energy update."
+                    message: "Database error."
                 });
-            });
+            }
+            if (!result || result.rowCount === 0) {
+                return res.status(409).json({
+                    success: false,
+                    message: "Today's history row is not ready yet. Try again in a few seconds."
+                });
+            }
+            mqtt.setEnergy(deviceId, value)
+                .then(() => {
+                    res.json({
+                        success: true,
+                        message: "Energy update sent to device."
+                    });
+                })
+                .catch((err) => {
+                    console.error("Set energy error:", err.message);
+                    database.shiftDailyBaseline(deviceId, -delta, () => {});
+                    res.status(500).json({
+                        success: false,
+                        message: "Failed to send energy update."
+                    });
+                });
+        });
     });
 });
 
