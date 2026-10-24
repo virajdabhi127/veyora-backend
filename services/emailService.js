@@ -33,4 +33,20 @@ async function sendLeadEmail(lead, from) {
     });
 }
 
-module.exports = { sendLeadEmail };
+async function sendComplaintEmail(c, from) {
+    const to = process.env.SUPPORT_EMAIL_TO || process.env.LEAD_EMAIL_TO;
+    if (!to) throw new Error("SUPPORT_EMAIL_TO / LEAD_EMAIL_TO is not set");
+    await transporter.sendMail({
+        from: `"Veyora Support" <${process.env.SMTP_USER}>`,
+        to,
+        subject: `New Complaint: ${c.name} (${c.deviceIds})`,
+        text:
+            `Name: ${c.name}\n` +
+            `Device ID: ${c.deviceIds}\n\n` +
+            `Problem:\n${c.problem}\n\n` +
+            `WhatsApp: +${from}\n` +
+            `Tap to chat: https://wa.me/${from}\n`,
+    });
+}
+
+module.exports = { sendLeadEmail, sendComplaintEmail };

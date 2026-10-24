@@ -1870,24 +1870,19 @@ function registerWhatsappNumberByDevice(deviceId, productKey, whatsappNumber, ca
 function deregisterWhatsappNumberByDevice(deviceId, productKey, whatsappNumber, callback) {
     const digits = String(whatsappNumber || "").replace(/\D/g, "");
     const last10 = digits.slice(-10);
-
     if (!deviceId || !productKey || last10.length !== 10) {
         const err = new Error("Invalid deregistration details");
         err.code = "DEREGISTRATION_FAILED";
         return callback(err, null);
     }
-
     (async () => {
         const client = await db.connect();
-
         try {
             await client.query("BEGIN");
-
             await client.query(
                 "SELECT pg_advisory_xact_lock(hashtext($1))",
                 [last10]
             );
-
             const deviceResult = await client.query(
                 `SELECT user_id, product_key
                  FROM devices
@@ -1896,28 +1891,22 @@ function deregisterWhatsappNumberByDevice(deviceId, productKey, whatsappNumber, 
                  LIMIT 1`,
                 [deviceId]
             );
-
             if (deviceResult.rows.length === 0) {
                 const err = new Error("Deregistration failed");
                 err.code = "DEREGISTRATION_FAILED";
                 throw err;
             }
-
             const device = deviceResult.rows[0];
-
             const validProductKey = await bcrypt.compare(
                 productKey,
                 device.product_key || ""
             );
-
             if (!validProductKey) {
                 const err = new Error("Deregistration failed");
                 err.code = "DEREGISTRATION_FAILED";
                 throw err;
             }
-
             const ownerUserId = device.user_id;
-
             const numberResult = await client.query(
                 `SELECT user_id
                  FROM users
@@ -1935,13 +1924,11 @@ function deregisterWhatsappNumberByDevice(deviceId, productKey, whatsappNumber, 
                  FOR UPDATE`,
                 [ownerUserId, last10]
             );
-
             if (numberResult.rows.length === 0) {
                 const err = new Error("Deregistration failed");
                 err.code = "NUMBER_NOT_LINKED";
                 throw err;
             }
-
             await client.query(
                 `UPDATE users
                  SET whatsapp_number = (
@@ -1960,11 +1947,8 @@ function deregisterWhatsappNumberByDevice(deviceId, productKey, whatsappNumber, 
                  WHERE user_id = $2`,
                 [last10, ownerUserId]
             );
-
             await client.query("COMMIT");
-
             return { success: true };
-
         } catch (err) {
             await client.query("ROLLBACK").catch(() => {});
             throw err;
@@ -1975,6 +1959,20 @@ function deregisterWhatsappNumberByDevice(deviceId, productKey, whatsappNumber, 
     })()
         .then(result => callback(null, result))
         .catch(err => callback(err, null));
+}
+
+function getLatestEnergySnapshot(deviceId, callback) {
+    db.query(
+        `SELECT
+            energy_kwh AS "energyKWh",
+            channel_energy AS "channelEnergy",
+            recorded_at AS "recordedAt"
+         FROM energy_history
+         WHERE device_id = $1
+         LIMIT 1`,
+        [deviceId],
+        (err, result) => callback(err, result?.rows[0] || null)
+    );
 }
 
 module.exports = {
@@ -2027,7 +2025,8 @@ module.exports = {
     linkWhatsappNumberToDevice,
     registerWhatsappNumberByDevice,
     deregisterWhatsappNumberByDevice,
-    shiftDailyBaseline
+    shiftDailyBaseline,
+    getLatestEnergySnapshot
 };
 
 async function migrateMeasurementColumnTypes() {

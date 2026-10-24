@@ -1,15 +1,31 @@
 const express = require("express");
 const db = require("../database");
-const { sendButtonMenu, sendTextMessage, sendCatalogMessage } = require("../services/whatsappService");
-const { sendLeadEmail } = require("../services/emailService");
+const { promisify } = require("util");
+const mqtt = require("../mqtt");
+const getDevicesByUser = promisify(db.getDevicesByUser);
+const getDailyEnergy = promisify(db.getDailyEnergy);
+const getMonthlyEnergy = promisify(db.getMonthlyEnergy);
+const getDeviceChannels = promisify(db.getDeviceChannels);
+const getEnergySnapshot = promisify(db.getLatestEnergySnapshot);
+const { sendButtonMenu, sendTextMessage, sendCatalogMessage, sendUrlButton } = require("../services/whatsappService");
+const { sendLeadEmail, sendComplaintEmail } = require("../services/emailService");
 const router = express.Router();
 const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
+
 const pendingVerifications = new Map();
 const enquiries = new Map(); 
 const ENQUIRY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const pendingOrders = new Map();
 const NAME_NUDGE_MS = 5 * 60 * 1000;
 const NAME_FINAL_MS = 15 * 60 * 1000;
+const updateRequests = new Map();
+const UPDATE_COOLDOWN_MS = (Number(process.env.UPDATE_COOLDOWN_MIN) || 60) * 60 * 1000;
+const pendingSupport = new Map();
+const SUPPORT_WAIT_MS = 10 * 60 * 1000;
+
+const SUPPORT_PROMPT_TEXT = "Please try to explain your problem in one message here, and our support team will look into it.";
+
+const SUPPORT_DONE_TEXT = "Thank you. We've received your complaint.\n\nOur support team will contact you shortly.";
 
 const NAME_QUESTION_TEXT = "Thanks for your interest in the Veyora Energy Monitor! 😊\n\nMay I know your name so our customer executive can address you properly?";
 
@@ -29,8 +45,6 @@ const WELCOME_TEXT = `Welcome to Veyora! ⚡
 Smarter Energy. Better Living.
 
 Veyora builds smart energy solutions that help homes and businesses understand their electricity usage and make smarter decisions about it.
-
-🌐 Know more about us: https://veyora.in/energy-monitor
 
 Browse our products below 👇`;
 
@@ -95,8 +109,10 @@ router.post("/", (req, res) => {
             );
             continue;
         } else {
-            console.log(`Unsupported message type: ${type} from ${from}`);
-            sendTextMessage(from, FALLBACK_TEXT).catch(() => {});
+            sendTextMessage(
+                from,
+                pendingSupport.has(from) ? "Please describe your problem in a text message." : FALLBACK_TEXT
+            ).catch(() => {});
             continue;
         }
         const body = rawBody.toLowerCase();
@@ -194,8 +210,16 @@ function handleIncomingMessage(from, rawBody, body) {
             );
             return;
         }
-
         if (user) {
+            const waiting = pendingSupport.get(from);
+            if (waiting) {
+                pendingSupport.delete(from);
+                const isMenuCommand = body === "deregister" || isGreeting(body) || body === "get_update" || body === "support";
+                if (Date.now() - waiting < SUPPORT_WAIT_MS && !isMenuCommand) {
+                    submitComplaint(from, user, rawBody);
+                    return;
+                }
+            }
             if (body === "deregister") {
                 pendingVerifications.set(from, {
                     step: "awaiting_deregister_device_id",
@@ -209,12 +233,11 @@ function handleIncomingMessage(from, rawBody, body) {
             }
             if (isGreeting(body)) {
                 handleGreeting(from, user);
-            } else if (body === "explore") {
-                sendCatalogMessage(from, "Browse the Veyora catalog 👇").catch(() => {});
+            } else if (body === "get_update") {
+                sendDeviceUpdates(from, user);
             } else if (body === "support") {
-                console.log(`Support selected by ${from}`);
-            } else if (body === "my_devices") {
-                console.log(`My Devices selected by ${from}`);
+                pendingSupport.set(from, Date.now());
+                sendTextMessage(from, SUPPORT_PROMPT_TEXT).catch(() => {});
             } else {
                 sendTextMessage(from, FALLBACK_TEXT).catch(() => {});
             }
@@ -228,10 +251,9 @@ function handleGreeting(from, user) {
     sendButtonMenu(
         from,
         `Welcome back, ${user.username}! What would you like to do?`,
-        [
-            { id: "explore", title: "Explore" },
-            { id: "support", title: "Support" },
-            { id: "my_devices", title: "My Devices" },
+        [   
+            { id: "get_update", title: "⚡ My Energy" },
+            { id: "support",    title: "💬 Support" },
         ]
     ).catch((e) => console.error("Menu send error:", e.message));
 }
@@ -266,7 +288,12 @@ function handleUnregisteredFlow(from, rawBody) {
             return;
         }
         if (isGreeting(command)) {
-            sendTextMessage(from, WELCOME_TEXT)
+            sendUrlButton(from, WELCOME_TEXT, "Visit Veyora", "https://veyora.in/energy-monitor")
+                .then((r) =>
+                    r.success
+                        ? r
+                        : sendTextMessage(from, `${WELCOME_TEXT}\n\n🌐 https://veyora.in/energy-monitor`)
+                )
                 .then(() =>
                     sendCatalogMessage(from, "Tap *View catalogue* to see our products and prices.")
                 )
@@ -434,6 +461,136 @@ function handleLead(from, rawBody) {
 
 function isGreeting(body) {
     return /^(hi|hello|hey|hii)[\s!.]*$/.test(body);
+}
+
+const IST = "Asia/Kolkata";
+const kwh = (v) => `${(Number(v) || 0).toFixed(2)} kWh`;
+const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v).toFixed(d) : "-");
+const istDay = (date) => new Date(date).toLocaleDateString("en-CA", { timeZone: IST });
+const formatIST = (date) =>
+    new Date(date).toLocaleString("en-IN", {
+        timeZone: IST, day: "2-digit", month: "short", year: "numeric",
+        hour: "2-digit", minute: "2-digit", hour12: true,
+    });
+
+function readLive(d) {
+    return {
+        voltage: d.voltage,
+        current: d.totalCurrent,
+        realPowerW: d.totalRealPower,
+        energyKWh: d.energyKWh,
+        channels: d.channels || [],
+    };
+}
+
+function channelLines(names, energyById) {
+    return [...names].map(
+        ([channelId, name]) => `• ${name}: ${kwh(energyById.get(channelId))}`
+    );
+}
+
+async function buildDeviceUpdate(device) {
+    const id = device.deviceId;
+    const channelRows = device.channelCount > 0 ? await getDeviceChannels(id) : [];
+    const names = new Map(channelRows.map((c) => [Number(c.channel_id), c.channel_name]));
+    const live = mqtt.latestDevices.get(id);
+    if (live && live.connected) {
+        const l = readLive(live);
+        const energyById = new Map(l.channels.map((c) => [Number(c.channelId), c.energyKWh]));
+        const lines = [
+            `⚡ *${id}* — Live now 🟢`,
+            "",
+            `Mains voltage: ${num(l.voltage, 1)} V`,
+            `Total current: ${num(l.current, 2)} A`,
+            `Real power: ${num(l.realPowerW, 0)} W`,
+            `Total energy: ${kwh(l.energyKWh)}`,
+        ];
+        if (names.size > 0) lines.push("", "*Channels*", ...channelLines(names, energyById));
+        return lines.join("\n");
+    }
+    const [snapshot, daily, monthly] = await Promise.all([
+        getEnergySnapshot(id),
+        getDailyEnergy(id),
+        getMonthlyEnergy(id),
+    ]);
+    const lastUpdate = snapshot?.recordedAt || device.lastUpdate;
+    const updatedToday = lastUpdate && istDay(lastUpdate) === istDay(new Date());
+    const energyById = new Map(
+        Object.entries(snapshot?.channelEnergy || {}).map(([k, v]) => [Number(k), v])
+    );
+    const lines = [
+        `⚡ *${id}* — Offline 🔴`,
+        `Last update: ${lastUpdate ? formatIST(lastUpdate) : "not available"}`,
+        "",
+        `Today: ${updatedToday ? kwh(daily.today) : "no data (device offline today)"}`,
+        `This month: ${kwh(monthly.currentMonth)}`,
+        `Total energy: ${kwh(snapshot?.energyKWh)}`,
+    ];
+    if (names.size > 0) lines.push("", "*Channels*", ...channelLines(names, energyById));
+    return lines.join("\n");
+}
+
+function formatWait(ms) {
+    const mins = Math.ceil(ms / 60000);
+    if (mins < 60) return `${mins} minute${mins === 1 ? "" : "s"}`;
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return `${h} hour${h === 1 ? "" : "s"}${m ? ` ${m} min` : ""}`;
+}
+
+async function sendDeviceUpdates(from, user) {
+    const entry = updateRequests.get(from);
+    if (entry && Date.now() - entry.sentAt < UPDATE_COOLDOWN_MS) {
+        if (!entry.warned) {
+            entry.warned = true;
+            const wait = formatWait(UPDATE_COOLDOWN_MS - (Date.now() - entry.sentAt));
+            await sendTextMessage(
+                from,
+                `⏳ Please wait ${wait} for your next update.`
+            ).catch(() => {});
+        }
+        return;
+    }
+    updateRequests.set(from, { sentAt: Date.now(), warned: false });
+    try {
+        const devices = await getDevicesByUser(user.user_id);
+        if (!devices || devices.length === 0) {
+            updateRequests.delete(from);
+            await sendTextMessage(from, "No device is linked to your account yet.\n\nTap *Support* from the menu if you need help.");
+            return;
+        }
+        const results = await Promise.allSettled(devices.map((d) => buildDeviceUpdate(d)));
+        let delivered = 0;
+        for (let i = 0; i < results.length; i++) {
+            if (results[i].status === "fulfilled") {
+                await sendTextMessage(from, results[i].value);
+                delivered++;
+            } else {
+                console.error(`Update failed for ${devices[i].deviceId}:`, results[i].reason?.message);
+                await sendTextMessage(from, `⚠️ ${devices[i].deviceId}: we couldn't fetch the update right now.`);
+            }
+        }
+        if (delivered === 0) updateRequests.delete(from);
+    } catch (e) {
+        updateRequests.delete(from);
+        console.error("Get update error:", e.message);
+        sendTextMessage(from, "⚠️ We couldn't fetch your update right now. Please try again in a moment.").catch(() => {});
+    }
+}
+
+async function submitComplaint(from, user, problem) {
+    try {
+        const devices = await getDevicesByUser(user.user_id);
+        const deviceIds = (devices || []).map((d) => d.deviceId).join(", ") || "-";
+        await sendComplaintEmail(
+            { name: user.username, deviceIds, problem: problem.trim().slice(0, 1500) },
+            from
+        );
+        await sendTextMessage(from, SUPPORT_DONE_TEXT);
+    } catch (e) {
+        console.error("Complaint email failed:", e.message);
+        sendTextMessage(from, "⚠️ We couldn't submit your complaint right now. Please tap Support and try again in a moment.").catch(() => {});
+    }
 }
 
 module.exports = router;

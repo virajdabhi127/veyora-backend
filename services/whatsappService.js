@@ -149,4 +149,34 @@ async function sendCatalogMessage(to, bodyText) {
   }
 }
 
-module.exports = { sendWelcomeMessage, sendTemplate, sendButtonMenu, sendTextMessage, sendCatalogMessage };
+async function sendUrlButton(to, bodyText, buttonText, url) {
+  const payload = {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'cta_url',
+      body: { text: bodyText },
+      action: {
+        name: 'cta_url',
+        parameters: { display_text: buttonText, url },
+      },
+    },
+  };
+  try {
+    const res = await axios.post(WHATSAPP_API_URL, payload, {
+      headers: {
+        Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+    });
+    return { success: true, id: res.data?.messages?.[0]?.id };
+  } catch (err) {
+    const detail = err.response?.data || err.message;
+    console.error(`URL button send failed for ${to}:`, JSON.stringify(detail));
+    return { success: false, error: detail };
+  }
+}
+
+module.exports = { sendWelcomeMessage, sendTemplate, sendButtonMenu, sendTextMessage, sendCatalogMessage, sendUrlButton };
