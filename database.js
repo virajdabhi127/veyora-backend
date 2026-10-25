@@ -1269,8 +1269,8 @@ function calculateDailyLoad(deviceId, historyDate, callback) {
             SELECT real_power, recorded_at
             FROM load_history
             WHERE device_id = $1
-            AND recorded_at >= ($2::date AT TIME ZONE 'Asia/Kolkata')
-            AND recorded_at < (($2::date + INTERVAL '1 day') AT TIME ZONE 'Asia/Kolkata')
+            AND recorded_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Kolkata')
+            AND recorded_at <  (($2::date::timestamp + INTERVAL '1 day') AT TIME ZONE 'Asia/Kolkata')
         ),
         ranked_data AS (
             SELECT
@@ -1487,8 +1487,8 @@ function deleteDailyLoadHistory(deviceId, historyDate, callback) {
     const query = `
         DELETE FROM load_history
         WHERE device_id = $1
-          AND recorded_at >= ($2::date AT TIME ZONE 'Asia/Kolkata')
-          AND recorded_at < (($2::date + 1) AT TIME ZONE 'Asia/Kolkata')
+          AND recorded_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Kolkata')
+          AND recorded_at <  (($2::date::timestamp + INTERVAL '1 day') AT TIME ZONE 'Asia/Kolkata')
     `;
     db.query(query, [deviceId, historyDate], (err, result) => {
         if (err) {
@@ -1501,19 +1501,11 @@ function deleteDailyLoadHistory(deviceId, historyDate, callback) {
 
 function getLoadHistory(deviceId, callback) {
     const query = `
-        SELECT
-            real_power,
-            recorded_at
+        SELECT real_power, recorded_at
         FROM load_history
         WHERE device_id = $1
-          AND recorded_at >= (
-              (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date
-              AT TIME ZONE 'Asia/Kolkata'
-          )
-          AND recorded_at < (
-              ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date + 1)
-              AT TIME ZONE 'Asia/Kolkata'
-          )
+          AND recorded_at >= DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata'
+          AND recorded_at <  (DATE_TRUNC('day', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') + INTERVAL '1 day') AT TIME ZONE 'Asia/Kolkata'
         ORDER BY recorded_at ASC
     `;
     db.query(query, [deviceId], (err, result) => {
@@ -1674,7 +1666,7 @@ function getStaleLoadHistoryDates(retentionDays, callback) {
             device_id AS "deviceId",
             (recorded_at AT TIME ZONE 'Asia/Kolkata')::date AS "historyDate"
         FROM load_history
-        WHERE recorded_at < (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata') - ($1::INTEGER * INTERVAL '1 day')
+        WHERE recorded_at < CURRENT_TIMESTAMP - ($1::INTEGER * INTERVAL '1 day')
     `;
     db.query(query, [retentionDays], (err, result) => {
         if (err) return callback(err, null);
