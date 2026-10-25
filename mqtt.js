@@ -109,12 +109,22 @@ function start() {
                     ackBatch(deviceId, data.batchId, { discarded: true });
                     return;
                 }
-                const validSamples = data.samples.filter(sample =>
-                    typeof sample.ts === "number" &&
-                    typeof sample.kw === "number" &&
-                    Number.isFinite(sample.ts) &&
-                    Number.isFinite(sample.kw)
-                );
+                const validSamples = data.samples
+                    .filter(sample =>
+                        typeof sample.ts === "number" &&
+                        typeof sample.kw === "number" &&
+                        Number.isFinite(sample.ts) &&
+                        Number.isFinite(sample.kw)
+                    )
+                    .map(sample => ({
+                        ts: sample.ts,
+                        kw: sample.kw,
+                        chW: Array.isArray(sample.chW) &&
+                             sample.chW.length <= config.maxChannelCount &&
+                             sample.chW.every(Number.isFinite)
+                            ? sample.chW
+                            : null
+                    }));
                 if (validSamples.length === 0) {
                     console.error(`All samples invalid in batch ${data.batchId} from ${deviceId}`);
                     ackBatch(deviceId, data.batchId, { discarded: true });
@@ -282,7 +292,8 @@ function start() {
                     database.saveLoadHistory(
                         deviceId,
                         deviceData.totalRealPower,
-                        new Date()
+                        new Date(),
+                        deviceData.channels.map(ch => Math.round(Number(ch.realPower) || 0))
                     );
                     lastLoadHistorySave.set(deviceId, now);
                     database.calculateDailyLoad(
@@ -353,7 +364,7 @@ function finalizePreviousDayLoad(deviceId) {
     );
 }
 
-const LOAD_HISTORY_RETENTION_DAYS = 2;
+const LOAD_HISTORY_RETENTION_DAYS = 5;
 
 setInterval(() => {
     database.getStaleLoadHistoryDates(LOAD_HISTORY_RETENTION_DAYS, (err, rows) => {

@@ -145,6 +145,7 @@ async function initializeDatabase() {
             id SERIAL PRIMARY KEY,
             device_id TEXT NOT NULL,
             real_power NUMERIC(18, 3) NOT NULL,
+            channel_power JSONB,
             recorded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (device_id) REFERENCES devices(device_id)
         );
@@ -1163,28 +1164,27 @@ function calculatePGVCLTodayCost(monthlyEnergy, todayEnergy) {
     return Number((currentCost - previousCost).toFixed(2));
 }
 
-function saveLoadHistory(deviceId, realPower, recordedAt, callback) {
-    const query = `
-        INSERT INTO load_history
-        (device_id, real_power, recorded_at)
-        VALUES ($1, $2, $3)
-    `;
+function saveLoadHistory(deviceId, realPower, recordedAt, channelPower, callback) {
     db.query(
-        query,
-        [deviceId, realPower, recordedAt],
+        `INSERT INTO load_history (device_id, real_power, recorded_at, channel_power)
+         VALUES ($1, $2, $3, $4::jsonb)`,
+        [
+            deviceId,
+            realPower,
+            recordedAt,
+            channelPower ? JSON.stringify(channelPower) : null
+        ],
         (err, result) => {
-            if (callback) {
-                callback(err, result);
-            }
+            if (callback) callback(err, result);
         }
     );
 }
-
 function saveLoadHistoryBatch(deviceId, batchId, samples, callback) {
     const MIN_VALID_EPOCH = 1704067200;
     const nowSec = Date.now() / 1000;
     const times = [];
     const powers = [];
+    const channelPowers = [];
     let dropped = 0;
 
     samples.forEach(s => {
@@ -1195,6 +1195,7 @@ function saveLoadHistoryBatch(deviceId, batchId, samples, callback) {
         }
         times.push(new Date(tsSec * 1000).toISOString());
         powers.push(Number(s.kw) * 1000);
+        channelPowers.push(Array.isArray(s.chW) ? JSON.stringify(s.chW) : null);
     });
 
     if (dropped > 0) {
@@ -1246,10 +1247,10 @@ function saveLoadHistoryBatch(deviceId, batchId, samples, callback) {
                         return finish(false);     // nothing valid to insert
                     }
                     client.query(
-                        `INSERT INTO load_history (device_id, real_power, recorded_at)
-                         SELECT $1::text, u.p, u.t
-                         FROM unnest($2::numeric[], $3::timestamptz[]) AS u(p, t)`,
-                        [deviceId, powers, times],
+                        `INSERT INTO load_history (device_id, real_power, recorded_at, channel_power)
+                         SELECT $1::text, u.p, u.t, u.c::jsonb
+                         FROM unnest($2::numeric[], $3::timestamptz[], $4::text[]) AS u(p, t, c)`,
+                        [deviceId, powers, times, channelPowers],
                         (err) => {
                             if (err) {
                                 return fail(err);
