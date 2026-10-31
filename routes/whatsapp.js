@@ -12,6 +12,8 @@ const { sendLeadEmail, sendComplaintEmail } = require("../services/emailService"
 const router = express.Router();
 const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
 
+const activeMenuSessions = new Map();
+const MENU_SESSION_MS = 10 * 60 * 1000;
 const pendingVerifications = new Map();
 const enquiries = new Map(); 
 const ENQUIRY_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -212,14 +214,20 @@ function handleIncomingMessage(from, rawBody, body) {
         }
         if (user) {
             const waiting = pendingSupport.get(from);
+
             if (waiting) {
                 pendingSupport.delete(from);
-                const isMenuCommand = body === "deregister" || isGreeting(body) || body === "get_update" || body === "support";
+                const isMenuCommand =
+                    body === "deregister" ||
+                    isGreeting(body) ||
+                    body === "get_update" ||
+                    body === "support";
                 if (Date.now() - waiting < SUPPORT_WAIT_MS && !isMenuCommand) {
                     submitComplaint(from, user, rawBody);
                     return;
                 }
             }
+
             if (body === "deregister") {
                 pendingVerifications.set(from, {
                     step: "awaiting_deregister_device_id",
@@ -231,9 +239,22 @@ function handleIncomingMessage(from, rawBody, body) {
                 ).catch(() => {});
                 return;
             }
+
             if (isGreeting(body)) {
                 handleGreeting(from, user);
-            } else if (body === "get_update") {
+                return;
+            }
+
+            const menuSessionStartedAt = activeMenuSessions.get(from);
+            if (
+                !menuSessionStartedAt ||
+                Date.now() - menuSessionStartedAt > MENU_SESSION_MS
+            ) {
+                activeMenuSessions.delete(from);
+                sendTextMessage(from, FALLBACK_TEXT).catch(() => {});
+                return;
+            }
+            if (body === "get_update") {
                 sendDeviceUpdates(from, user);
             } else if (body === "support") {
                 pendingSupport.set(from, Date.now());
@@ -248,12 +269,13 @@ function handleIncomingMessage(from, rawBody, body) {
 }
 
 function handleGreeting(from, user) {
+    activeMenuSessions.set(from, Date.now());
     sendButtonMenu(
         from,
         `Welcome back, ${user.username}! What would you like to do?`,
-        [   
+        [
             { id: "get_update", title: "⚡ My Energy" },
-            { id: "support",    title: "💬 Support" },
+            { id: "support", title: "💬 Support" },
         ]
     ).catch((e) => console.error("Menu send error:", e.message));
 }

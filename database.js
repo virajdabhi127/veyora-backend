@@ -1968,6 +1968,124 @@ function getLatestEnergySnapshot(deviceId, callback) {
     );
 }
 
+const MONTHLY_RECALC_SQL = `
+    INSERT INTO energy_monthly_history (device_id, history_month, energy_kwh)
+    SELECT $1::text, $2::date, COALESCE(SUM(energy_kwh), 0)
+    FROM energy_daily_history
+    WHERE device_id = $1
+      AND history_date >= $2::date
+      AND history_date < ($2::date + INTERVAL '1 month')
+    ON CONFLICT (device_id, history_month)
+    DO UPDATE SET energy_kwh = EXCLUDED.energy_kwh,
+                  created_at = CURRENT_TIMESTAMP`;
+
+function applyOfflineEnergyFile(deviceId, historyDate, offlineKWh, callback) {
+    (async () => {
+        const client = await db.connect();
+        try {
+            await client.query("BEGIN");
+            await client.query(
+                "SELECT pg_advisory_xact_lock(hashtext($1))",
+                [`daily:${deviceId}`]
+            );
+            const today = getISTDate();
+            const { rows } = await client.query(
+                `SELECT h.id,
+                        h.history_date::text AS d,
+                        h.energy_kwh::text AS e,
+                        ((h.history_date + 1)::timestamp AT TIME ZONE 'Asia/Kolkata') AS day_end,
+                        (h.history_date < $3::date
+                         AND h.created_at < ((h.history_date + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
+                                            - INTERVAL '120 seconds') AS unfinished,
+                        (h.created_at >= COALESCE(dv.last_update, '-infinity'::timestamptz)) AS live_since_reconnect
+                 FROM energy_daily_history h
+                 JOIN devices dv ON dv.device_id = h.device_id
+                 WHERE h.device_id = $1 AND h.history_date >= $2::date
+                 ORDER BY h.history_date`,
+                [deviceId, historyDate, today]
+            );
+
+            const own = rows.length > 0 && rows[0].d === historyDate ? rows[0] : null;
+            if (own && !own.unfinished) {
+                await client.query("COMMIT");
+                return "ignored";
+            }
+
+            const later = own ? rows.slice(1) : rows;
+            const k = later.findIndex(r => !r.unfinished);
+            const target = k >= 0 ? later[k] : null;
+            const between = k >= 0 ? later.slice(0, k) : [];
+            if (!target || (target.d === today && !target.live_since_reconnect)) {
+                await client.query("COMMIT");
+                return "retry";
+            }
+            const delta = Math.min(Number(offlineKWh), Number(target.e));
+            if (own) {
+                await client.query(
+                    `UPDATE energy_daily_history
+                     SET energy_kwh = energy_kwh + $2::numeric,
+                         created_at = $3::timestamptz - INTERVAL '1 millisecond'
+                     WHERE id = $1`,
+                    [own.id, delta, own.day_end]
+                );
+            } else {
+                const prev = await client.query(
+                    `SELECT (start_energy_kwh + energy_kwh) AS end_kwh
+                     FROM energy_daily_history
+                     WHERE device_id = $1 AND history_date < $2::date
+                     ORDER BY history_date DESC
+                     LIMIT 1`,
+                    [deviceId, historyDate]
+                );
+                if (prev.rows.length === 0) {
+                    await client.query("COMMIT");
+                    return "ignored";
+                }
+                await client.query(
+                    `INSERT INTO energy_daily_history
+                     (device_id, history_date, energy_kwh, start_energy_kwh, created_at)
+                     VALUES ($1, $2::date, $3::numeric, $4::numeric,
+                             (($2::date + 1)::timestamp AT TIME ZONE 'Asia/Kolkata') - INTERVAL '1 millisecond')`,
+                    [deviceId, historyDate, delta, prev.rows[0].end_kwh]
+                );
+            }
+            if (delta > 0) {
+                const ids = between.map(r => r.id);
+                if (ids.length > 0) {
+                    await client.query(
+                        `UPDATE energy_daily_history
+                         SET start_energy_kwh = start_energy_kwh + $2::numeric
+                         WHERE id = ANY($1::int[])`,
+                        [ids, delta]
+                    );
+                }
+                await client.query(
+                    `UPDATE energy_daily_history
+                     SET start_energy_kwh = start_energy_kwh + $2::numeric,
+                         energy_kwh = GREATEST(energy_kwh - $2::numeric, 0)
+                     WHERE id = $1`,
+                    [target.id, delta]
+                );
+            }
+            const months = new Set(
+                [historyDate, ...between.map(r => r.d), target.d].map(d => `${d.slice(0, 7)}-01`)
+            );
+            for (const month of months) {
+                await client.query(MONTHLY_RECALC_SQL, [deviceId, month]);
+            }
+            await client.query("COMMIT");
+            return "applied";
+        } catch (err) {
+            await client.query("ROLLBACK").catch(() => {});
+            throw err;
+        } finally {
+            client.release();
+        }
+    })()
+        .then((status) => callback(null, status))
+        .catch((err) => callback(err));
+}
+
 module.exports = {
     getUser,
     init,
@@ -2019,7 +2137,8 @@ module.exports = {
     registerWhatsappNumberByDevice,
     deregisterWhatsappNumberByDevice,
     shiftDailyBaseline,
-    getLatestEnergySnapshot
+    getLatestEnergySnapshot,
+    applyOfflineEnergyFile
 };
 
 async function migrateMeasurementColumnTypes() {

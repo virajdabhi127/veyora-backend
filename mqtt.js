@@ -158,6 +158,10 @@ function start() {
             }
             return;
         }
+        if (messageType === "day" && parts[3] === "energy") {
+            handleOfflineDayFile(deviceId, message);
+            return;
+        }
         if (messageType === "wifi") {
             try {
                 const data = JSON.parse(
@@ -338,6 +342,50 @@ function ackBatch(deviceId, batchId, extra) {
         JSON.stringify(Object.assign({ batchId, success: true }, extra)),
         { qos: 1 }
     );
+}
+
+const MAX_OFFLINE_DAY_KWH = 5000;
+
+function ackDay(deviceId, date, extra) {
+    client.publish(
+        `energymeter/${deviceId}/day/ack`,
+        JSON.stringify(Object.assign({ date, success: true }, extra)),
+        { qos: 1 }
+    );
+}
+
+function handleOfflineDayFile(deviceId, message) {
+    let data;
+    try {
+        data = JSON.parse(message.toString());
+    } catch (err) {
+        return;
+    }
+    if (typeof data !== "object" || data === null) return;
+    const dateStr = String(data.date || "");
+    if (!/^\d{8}$/.test(dateStr)) return;
+    const historyDate = `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)}`;
+    const energy = Number(data.energyKWh);
+    if (
+        historyDate >= getISTDateString() ||
+        data.off !== 1 ||
+        !Number.isFinite(energy) || energy < 0 || energy > MAX_OFFLINE_DAY_KWH
+    ) {
+        ackDay(deviceId, dateStr, { discarded: true });
+        return;
+    }
+
+    database.getDevice(deviceId, (err, device) => {
+        if (err || !device) return;
+        database.applyOfflineEnergyFile(deviceId, historyDate, energy, (err, status) => {
+            if (err) {
+                console.error(`Offline day file failed for ${deviceId} ${historyDate}:`, err.message);
+                return;
+            }
+            if (status === "retry") return;
+            ackDay(deviceId, dateStr, status === "ignored" ? { ignored: true } : {});
+        });
+    });
 }
 
 function finalizePreviousDayLoad(deviceId) {
